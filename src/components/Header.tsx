@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { PRESET_CAPACITIES, PresetOption } from '../utils/constants';
 import { CalculationResults, CapacityPreset, UnitSystem } from '../types/dryer';
+import { summariseChecks } from '../utils/checkSummary';
 
 interface HeaderProps {
   currentPreset: CapacityPreset;
@@ -43,9 +44,10 @@ export const Header: React.FC<HeaderProps> = ({
   onUnitSystemChange,
   results,
 }) => {
-  const dangerCount = results.checks.filter((c) => c.severity === 'danger').length;
-  const warningCount = results.checks.filter((c) => c.severity === 'warning').length;
-  const infoCount = results.checks.filter((c) => c.severity === 'info').length;
+  // ITEM 26: counts come from the shared selector, so this masthead and the
+  // verdict banner on the dashboard cannot state different things about the same
+  // design. The three counts were previously derived here independently.
+  const { danger: dangerCount, warning: warningCount, info: infoCount } = summariseChecks(results.checks);
 
   return (
     <header className="bg-graphite text-paper border-b-2 border-brass">

@@ -18,6 +18,7 @@ import {
   HelpCircle
 } from 'lucide-react';
 import { CalculationResults, PressureSystemType, UnitSystem } from '../types/dryer';
+import { summariseChecks, verdictHeadline } from '../utils/checkSummary';
 import {
   formatCapacityDisplay,
   formatHeatDutyDisplay,
@@ -51,7 +52,13 @@ export const SummaryDashboard: React.FC<SummaryDashboardProps> = ({
 }) => {
   const { materialBalance, energyBalance, dimensions, fluidDynamics, checks, inputs, pressureSystem } = results;
 
-  const criticalChecks = checks.filter((c) => c.severity === 'danger' || c.severity === 'warning');
+  // ITEM 26: the counts now come from the shared selector, so this banner and the
+  // header cannot contradict each other. Previously this counted only danger and
+  // warning, so a design whose only outstanding item was severity `info` printed
+  // an unconditional "All engineering checks pass" while the header, which did
+  // count info, showed "1 for review" on the same page.
+  const checkCounts = summariseChecks(checks);
+  const criticalChecks = checkCounts.firstOutstanding ? [checkCounts.firstOutstanding] : [];
 
   // CIRAD ratio rating & thermodynamic equilibrium
   const airToWetRatio = energyBalance.airToWetFeedRatio ?? (energyBalance.airToStarchRatio * (1 - inputs.initialMoisture / 100));
@@ -61,24 +68,42 @@ export const SummaryDashboard: React.FC<SummaryDashboardProps> = ({
   return (
     <div className="space-y-5">
       {/* Verdict. One line, near the top. This is the answer to the user's question. */}
-      {criticalChecks.length > 0 ? (
-        <div className="rule-b rule-t border-oxide/25 bg-oxide-wash px-1 py-2.5 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+      {!checkCounts.allPass ? (
+        <div
+          className={`rule-b rule-t px-1 py-2.5 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 ${
+            checkCounts.danger > 0
+              ? 'border-oxide/25 bg-oxide-wash'
+              : checkCounts.warning > 0
+                ? 'border-amber/25 bg-amber-wash'
+                : 'border-verdigris/25 bg-verdigris-wash'
+          }`}
+        >
           <div className="flex items-start gap-2.5 min-w-0">
-            <AlertTriangle className="w-4 h-4 text-oxide shrink-0 mt-0.5" aria-hidden="true" />
+            {checkCounts.danger > 0 ? (
+              <AlertTriangle className="w-4 h-4 text-oxide shrink-0 mt-0.5" aria-hidden="true" />
+            ) : (
+              <Info className="w-4 h-4 shrink-0 mt-0.5 text-verdigris" aria-hidden="true" />
+            )}
             <div className="min-w-0">
-              <p className="text-[13px] font-semibold text-oxide leading-tight">
-                {criticalChecks.length} engineering check{criticalChecks.length > 1 ? 's' : ''} require attention
+              <p
+                className={`text-[13px] font-semibold leading-tight ${
+                  checkCounts.danger > 0 ? 'text-oxide' : 'text-graphite'
+                }`}
+              >
+                {verdictHeadline(checkCounts)}
               </p>
-              <p className="text-[12px] text-graphite-soft mt-0.5 leading-snug">
-                <span className="font-medium text-graphite">{criticalChecks[0].title}.</span>{' '}
-                {criticalChecks[0].message}
-              </p>
+              {criticalChecks.length > 0 && (
+                <p className="text-[12px] text-graphite-soft mt-0.5 leading-snug">
+                  <span className="font-medium text-graphite">{criticalChecks[0].title}.</span>{' '}
+                  {criticalChecks[0].message}
+                </p>
+              )}
             </div>
           </div>
           <button
             type="button"
             onClick={onOpenChecks}
-            className="shrink-0 self-start px-2.5 py-1 text-[11px] font-semibold bg-oxide text-paper hover:opacity-90 transition-opacity"
+            className="shrink-0 self-start px-2.5 py-1 text-[11px] font-semibold bg-graphite text-paper hover:opacity-90 transition-opacity"
           >
             Review check
           </button>

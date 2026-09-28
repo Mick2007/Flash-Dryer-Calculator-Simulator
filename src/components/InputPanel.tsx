@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { DryerInputs, CycloneType, DesignMethodology, PressureSystemType } from '../types/dryer';
 import { CIRAD_PILOT_BENCHMARK, MATERIAL_PROPERTY_PRESETS, CIRAD_BENCHMARKS } from '../utils/constants';
+import { NumericField } from './NumericField';
 
 interface InputPanelProps {
   inputs: DryerInputs;
@@ -35,58 +36,18 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
     });
   };
 
-  // Raw text for numeric fields, so an empty box stays empty.
+  // ITEM 25: numeric fields are now <NumericField>, which owns its own draft
+  // string. The two helpers that used to live here are gone.
   //
-  // The fields were previously wired as `updateNumeric('x', 75, e)`.
-  // parseFloat('') is NaN, and NaN is falsy, so the `|| 75` fallback fired the
-  // instant the user selected the contents and pressed delete — the box snapped
-  // back to 75 and could never be cleared. The user could not type a new value
-  // without first fighting the field.
+  // They were an intermediate fix, and they were still wrong in two ways. First,
+  // the out-of-range case: the field echoed whatever the user typed while the
+  // engine silently clamped it, so typing 758 showed 758 when 150 was actually
+  // being used. Second, the empty case propagated NaN into the inputs object,
+  // which relied on the engine's internal substitution and left the panel and the
+  // engine temporarily disagreeing about the value.
   //
-  // The calculation engine already sanitises every input internally (clampNum
-  // substitutes a fallback for any non-finite value and records the substitution
-  // in the disclosed-validation list), so an empty field is SAFE to propagate: the
-  // engine substitutes the default, and the user is told it did so. Holding the
-  // raw string in component state is therefore both correct and more honest than
-  // coercing at the input.
-  const [rawNumericFields, setRawNumericFields] = useState<Record<string, string>>({});
-
-  const updateNumeric = <K extends keyof DryerInputs>(
-    field: K,
-    fallback: number,
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const text = e.target.value;
-    setRawNumericFields((prev) => ({ ...prev, [field as string]: text }));
-
-    if (text.trim() === '') {
-      // Field cleared. Propagate NaN deliberately — the engine clamps it and
-      // discloses the substitution. Keeping the placeholder visible is better UX
-      // than silently reinstating a number the user just deleted.
-      onChange({
-        ...inputs,
-        [field]: Number.NaN as DryerInputs[K],
-      });
-      return;
-    }
-
-    const parsed = parseFloat(text);
-    if (Number.isFinite(parsed)) {
-      onChange({
-        ...inputs,
-        [field]: parsed as DryerInputs[K],
-      });
-    }
-  };
-
-  // Value to display: the raw text while the user is editing, otherwise the
-  // engine's stored number, otherwise the placeholder default.
-  const numericValue = <K extends keyof DryerInputs>(field: K, fallback: number): string => {
-    const raw = rawNumericFields[field as string];
-    if (raw !== undefined) return raw;
-    const stored = inputs[field];
-    return typeof stored === 'number' && Number.isFinite(stored) ? String(stored) : String(fallback);
-  };
+  // NumericField reverts to the last valid value on blur, snaps to the bound and
+  // says so, and never commits a non-finite number at all.
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
@@ -371,15 +332,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <span className="text-[10px] font-medium text-slate-500">Wet Basis %</span>
                 </div>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={25}
-                    max={65}
-                    step={0.5}
-                    value={numericValue('initialMoisture', 0)}
-                    onChange={(e) => updateNumeric('initialMoisture', 40, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
-                  />
+                  <NumericField value={inputs.initialMoisture} onCommit={(v) => update('initialMoisture', v)}
+                    min={25} max={65}
+                    step={0.5} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">%</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -396,15 +351,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <span className="text-[10px] font-medium text-slate-500">Wet Basis %</span>
                 </div>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={5}
-                    max={15}
-                    step={0.1}
-                    value={numericValue('finalMoisture', 0)}
-                    onChange={(e) => updateNumeric('finalMoisture', 12, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
-                  />
+                  <NumericField value={inputs.finalMoisture} onCommit={(v) => update('finalMoisture', v)}
+                    min={5} max={15}
+                    step={0.1} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">%</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -432,15 +381,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Drying Air Inlet Temp (T_in)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={120}
-                    max={220}
-                    step={1}
-                    value={numericValue('inletAirTemp', 0)}
-                    onChange={(e) => updateNumeric('inletAirTemp', 170, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.inletAirTemp} onCommit={(v) => update('inletAirTemp', v)}
+                    min={120} max={220}
+                    step={1} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">°C</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -454,15 +397,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Exhaust Air Outlet Temp (T_out)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={60}
-                    max={100}
-                    step={1}
-                    value={numericValue('outletAirTemp', 0)}
-                    onChange={(e) => updateNumeric('outletAirTemp', 75, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.outletAirTemp} onCommit={(v) => update('outletAirTemp', v)}
+                    min={60} max={100}
+                    step={1} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">°C</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -476,15 +413,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Ambient Air Temp (T_amb)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={10}
-                    max={45}
-                    step={1}
-                    value={numericValue('ambientTemp', 0)}
-                    onChange={(e) => updateNumeric('ambientTemp', 27, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.ambientTemp} onCommit={(v) => update('ambientTemp', v)}
+                    min={10} max={45}
+                    step={1} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">°C</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -498,15 +429,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Ambient Relative Humidity (RH)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={20}
-                    max={95}
-                    step={1}
-                    value={numericValue('ambientRH', 0)}
-                    onChange={(e) => updateNumeric('ambientRH', 70, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.ambientRH} onCommit={(v) => update('ambientRH', v)}
+                    min={20} max={95}
+                    step={1} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">%</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -520,15 +445,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Cassava Feed Temp (T_feed)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={15}
-                    max={40}
-                    step={1}
-                    value={numericValue('feedTemp', 0)}
-                    onChange={(e) => updateNumeric('feedTemp', 25, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.feedTemp} onCommit={(v) => update('feedTemp', v)}
+                    min={15} max={40}
+                    step={1} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">°C</span>
                 </div>
               </div>
@@ -539,15 +458,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Product Exit Temp (T_prod)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={35}
-                    max={65}
-                    step={1}
-                    value={numericValue('finalProductTemp', 0)}
-                    onChange={(e) => updateNumeric('finalProductTemp', 50, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.finalProductTemp} onCommit={(v) => update('finalProductTemp', v)}
+                    min={35} max={65}
+                    step={1} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">°C</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -561,15 +474,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Site Elevation / Altitude
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={0}
-                    max={3000}
-                    step={50}
-                    value={numericValue('altitude', 0)}
-                    onChange={(e) => updateNumeric('altitude', 0, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.altitude} onCommit={(v) => update('altitude', v)}
+                    min={0} max={3000}
+                    step={50} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">m</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -583,15 +490,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Pipe Wall Heat Loss Margin
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={0.05}
-                    max={0.30}
-                    step={0.01}
-                    value={numericValue('heatLossFactor', 0)}
-                    onChange={(e) => updateNumeric('heatLossFactor', 0.12, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.heatLossFactor} onCommit={(v) => update('heatLossFactor', v)}
+                    min={0.05} max={0.30}
+                    step={0.01} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">frac</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -653,15 +554,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   </span>
                 </div>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={10}
-                    max={25}
-                    step={0.5}
-                    value={numericValue('airVelocity', 0)}
-                    onChange={(e) => updateNumeric('airVelocity', 15, e)}
-                    className="w-full px-3 py-2 pr-12 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.airVelocity} onCommit={(v) => update('airVelocity', v)}
+                    min={10} max={25}
+                    step={0.5} className="w-full px-3 py-2 pr-12 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">m/s</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -678,15 +573,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <span className="text-[10px] font-semibold text-slate-500">CIRAD 230 µm</span>
                 </div>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={100}
-                    max={500}
-                    step={5}
-                    value={numericValue('particleDiameter', 0)}
-                    onChange={(e) => updateNumeric('particleDiameter', 230, e)}
-                    className="w-full px-3 py-2 pr-12 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.particleDiameter} onCommit={(v) => update('particleDiameter', v)}
+                    min={100} max={500}
+                    step={5} className="w-full px-3 py-2 pr-12 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">µm</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -700,15 +589,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Particle Solid Density (rho_p)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={1200}
-                    max={1600}
-                    step={10}
-                    value={numericValue('particleDensity', 0)}
-                    onChange={(e) => updateNumeric('particleDensity', 1480, e)}
-                    className="w-full px-3 py-2 pr-14 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.particleDensity} onCommit={(v) => update('particleDensity', v)}
+                    min={1200} max={1600}
+                    step={10} className="w-full px-3 py-2 pr-14 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">kg/m³</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -722,15 +605,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Cassava Flour Bulk Density (rho_b)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={400}
-                    max={800}
-                    step={10}
-                    value={numericValue('bulkDensity', 0)}
-                    onChange={(e) => updateNumeric('bulkDensity', 600, e)}
-                    className="w-full px-3 py-2 pr-14 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.bulkDensity} onCommit={(v) => update('bulkDensity', v)}
+                    min={400} max={800}
+                    step={10} className="w-full px-3 py-2 pr-14 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">kg/m³</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -744,15 +621,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Specific Heat Capacity (C_ps)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={1.2}
-                    max={2.2}
-                    step={0.01}
-                    value={numericValue('cassavaSpecificHeat', 0)}
-                    onChange={(e) => updateNumeric('cassavaSpecificHeat', 1.67, e)}
-                    className="w-full px-3 py-2 pr-20 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.cassavaSpecificHeat} onCommit={(v) => update('cassavaSpecificHeat', v)}
+                    min={1.2} max={2.2}
+                    step={0.01} className="w-full px-3 py-2 pr-20 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">kJ/(kg·K)</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -766,15 +637,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Target Particle Contact Time (tau)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
-                    min={0.8}
-                    max={3.0}
-                    step={0.1}
-                    value={numericValue('targetResidenceTime', 0)}
-                    onChange={(e) => updateNumeric('targetResidenceTime', 1.5, e)}
-                    className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <NumericField value={inputs.targetResidenceTime} onCommit={(v) => update('targetResidenceTime', v)}
+                    min={0.8} max={3.0}
+                    step={0.1} className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">sec</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
@@ -793,13 +658,13 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   </span>
                 </div>
                 <div className="relative">
-                  <input
-                    type="number"
+                  <NumericField
+                    value={inputs.customTotalPipeLengthM || 20.0}
+                    onCommit={(v) => update('customTotalPipeLengthM', v)}
                     min={10}
                     max={40}
                     step={0.5}
-                    value={inputs.customTotalPipeLengthM || 20.0}
-                    onChange={(e) => updateNumeric('customTotalPipeLengthM', 20.0, e)}
+                    data-testid="field-custom-length"
                     className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
                   />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">m</span>
@@ -834,13 +699,13 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   Factory Ceiling Clearance (H_max)
                 </label>
                 <div className="relative">
-                  <input
-                    type="number"
+                  <NumericField
+                    value={inputs.ceilingClearanceM || 8.0}
+                    onCommit={(v) => update('ceilingClearanceM', v)}
                     min={5.0}
                     max={15.0}
                     step={0.5}
-                    value={inputs.ceilingClearanceM || 8.0}
-                    onChange={(e) => updateNumeric('ceilingClearanceM', 8.0, e)}
+                    data-testid="field-ceiling"
                     className="w-full px-3 py-2 pr-10 text-sm font-bold border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
                   />
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">m</span>
@@ -1221,15 +1086,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Holding Time (t_r, min)
                   </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={60}
-                    step={1}
-                    value={numericValue('hopperHoldingTimeMin', 10)}
-                    onChange={(e) => updateNumeric('hopperHoldingTimeMin', 10, e)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold"
-                  />
+                  <NumericField value={inputs.hopperHoldingTimeMin} onCommit={(v) => update('hopperHoldingTimeMin', v)}
+                    min={1} max={60}
+                    step={1} className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold" />
                   <span className="text-[10px] text-slate-400">Ref: 10 min buffer</span>
                 </div>
 
@@ -1237,15 +1096,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Volume Allowance (%)
                   </label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={50}
-                    step={1}
-                    value={numericValue('hopperVolumeAllowancePercent', 10)}
-                    onChange={(e) => updateNumeric('hopperVolumeAllowancePercent', 10, e)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold"
-                  />
+                  <NumericField value={inputs.hopperVolumeAllowancePercent} onCommit={(v) => update('hopperVolumeAllowancePercent', v)}
+                    min={0} max={50}
+                    step={1} className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold" />
                   <span className="text-[10px] text-slate-400">Ref: 10% freeboard</span>
                 </div>
 
@@ -1254,25 +1107,13 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                     Top Opening W1 &times; L1 (m)
                   </label>
                   <div className="flex items-center gap-1 font-mono">
-                    <input
-                      type="number"
-                      min={0.2}
-                      max={2.0}
-                      step={0.05}
-                      value={numericValue('hopperTopWidthM', 0.5)}
-                      onChange={(e) => updateNumeric('hopperTopWidthM', 0.5, e)}
-                      className="w-1/2 px-2 py-1.5 border border-slate-300 rounded font-bold text-center"
-                    />
+                    <NumericField value={inputs.hopperTopWidthM} onCommit={(v) => update('hopperTopWidthM', v)}
+                      min={0.2} max={2.0}
+                      step={0.05} className="w-1/2 px-2 py-1.5 border border-slate-300 rounded font-bold text-center" />
                     <span>&times;</span>
-                    <input
-                      type="number"
-                      min={0.2}
-                      max={2.0}
-                      step={0.05}
-                      value={numericValue('hopperTopLengthM', 0.5)}
-                      onChange={(e) => updateNumeric('hopperTopLengthM', 0.5, e)}
-                      className="w-1/2 px-2 py-1.5 border border-slate-300 rounded font-bold text-center"
-                    />
+                    <NumericField value={inputs.hopperTopLengthM} onCommit={(v) => update('hopperTopLengthM', v)}
+                      min={0.2} max={2.0}
+                      step={0.05} className="w-1/2 px-2 py-1.5 border border-slate-300 rounded font-bold text-center" />
                   </div>
                   <span className="text-[10px] text-slate-400">Ref: 0.50 &times; 0.50 m</span>
                 </div>
@@ -1282,25 +1123,13 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                     Outlet W2 &times; L2 (m)
                   </label>
                   <div className="flex items-center gap-1 font-mono">
-                    <input
-                      type="number"
-                      min={0.1}
-                      max={1.0}
-                      step={0.02}
-                      value={numericValue('hopperOutletWidthM', 0.32)}
-                      onChange={(e) => updateNumeric('hopperOutletWidthM', 0.32, e)}
-                      className="w-1/2 px-2 py-1.5 border border-slate-300 rounded font-bold text-center"
-                    />
+                    <NumericField value={inputs.hopperOutletWidthM} onCommit={(v) => update('hopperOutletWidthM', v)}
+                      min={0.1} max={1.0}
+                      step={0.02} className="w-1/2 px-2 py-1.5 border border-slate-300 rounded font-bold text-center" />
                     <span>&times;</span>
-                    <input
-                      type="number"
-                      min={0.1}
-                      max={1.0}
-                      step={0.02}
-                      value={numericValue('hopperOutletLengthM', 0.22)}
-                      onChange={(e) => updateNumeric('hopperOutletLengthM', 0.22, e)}
-                      className="w-1/2 px-2 py-1.5 border border-slate-300 rounded font-bold text-center"
-                    />
+                    <NumericField value={inputs.hopperOutletLengthM} onCommit={(v) => update('hopperOutletLengthM', v)}
+                      min={0.1} max={1.0}
+                      step={0.02} className="w-1/2 px-2 py-1.5 border border-slate-300 rounded font-bold text-center" />
                   </div>
                   <span className="text-[10px] text-slate-400">Ref: 0.32 &times; 0.22 m</span>
                 </div>
@@ -1309,15 +1138,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Upper Collar h1 (m)
                   </label>
-                  <input
-                    type="number"
-                    min={0.05}
-                    max={0.5}
-                    step={0.01}
-                    value={numericValue('hopperUpperHeightM', 0.1)}
-                    onChange={(e) => updateNumeric('hopperUpperHeightM', 0.1, e)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold"
-                  />
+                  <NumericField value={inputs.hopperUpperHeightM} onCommit={(v) => update('hopperUpperHeightM', v)}
+                    min={0.05} max={0.5}
+                    step={0.01} className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold" />
                   <span className="text-[10px] text-slate-400">Ref: 0.10 m (100 mm)</span>
                 </div>
 
@@ -1460,15 +1283,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Screw Diameter (mm)
                   </label>
-                  <input
-                    type="number"
-                    min={50}
-                    max={400}
-                    step={10}
-                    value={numericValue('screwDiameterMm', 100)}
-                    onChange={(e) => updateNumeric('screwDiameterMm', 100, e)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold"
-                  />
+                  <NumericField value={inputs.screwDiameterMm} onCommit={(v) => update('screwDiameterMm', v)}
+                    min={50} max={400}
+                    step={10} className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold" />
                   <span className="text-[10px] text-slate-400">Ref: 100 mm (4 in)</span>
                 </div>
 
@@ -1476,15 +1293,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Screw Length (mm)
                   </label>
-                  <input
-                    type="number"
-                    min={300}
-                    max={4000}
-                    step={50}
-                    value={numericValue('screwLengthMm', 1000)}
-                    onChange={(e) => updateNumeric('screwLengthMm', 1000, e)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold"
-                  />
+                  <NumericField value={inputs.screwLengthMm} onCommit={(v) => update('screwLengthMm', v)}
+                    min={300} max={4000}
+                    step={50} className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold" />
                   <span className="text-[10px] text-slate-400">Ref: 1000 mm (3.28 ft)</span>
                 </div>
 
@@ -1492,13 +1303,13 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Selected Operating RPM
                   </label>
-                  <input
-                    type="number"
+                  <NumericField
+                    value={inputs.screwSelectedRpm ?? 55}
+                    onCommit={(v) => update('screwSelectedRpm', Math.round(v))}
                     min={10}
                     max={120}
                     step={1}
-                    value={numericValue('screwSelectedRpm', 55)}
-                    onChange={(e) => update('screwSelectedRpm', parseInt(e.target.value, 10) || 55)}
+                    data-testid="field-screw-rpm"
                     className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold text-emerald-700"
                   />
                   <span className="text-[10px] text-slate-400">Ref: 55 RPM (Req: ~51 RPM)</span>
@@ -1514,15 +1325,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Overload Factor (Fo)
                   </label>
-                  <input
-                    type="number"
-                    min={1.0}
-                    max={5.0}
-                    step={0.1}
-                    value={numericValue('screwOverloadFactor', 3.0)}
-                    onChange={(e) => updateNumeric('screwOverloadFactor', 3.0, e)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold"
-                  />
+                  <NumericField value={inputs.screwOverloadFactor} onCommit={(v) => update('screwOverloadFactor', v)}
+                    min={1.0} max={5.0}
+                    step={0.1} className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold" />
                   <span className="text-[10px] text-slate-400">3.0 (CEMA Heavy Starting)</span>
                 </div>
 
@@ -1530,15 +1335,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Drive Efficiency (E)
                   </label>
-                  <input
-                    type="number"
-                    min={0.5}
-                    max={0.99}
-                    step={0.01}
-                    value={numericValue('screwDriveEfficiency', 0.88)}
-                    onChange={(e) => updateNumeric('screwDriveEfficiency', 0.88, e)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold"
-                  />
+                  <NumericField value={inputs.screwDriveEfficiency} onCommit={(v) => update('screwDriveEfficiency', v)}
+                    min={0.5} max={0.99}
+                    step={0.01} className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold" />
                   <span className="text-[10px] text-slate-400">0.88 (88% gear drive)</span>
                 </div>
 
@@ -1546,15 +1345,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Recommended Motor (kW)
                   </label>
-                  <input
-                    type="number"
-                    min={0.25}
-                    max={7.5}
-                    step={0.1}
-                    value={numericValue('practicalMotorPowerKW', 0.75)}
-                    onChange={(e) => updateNumeric('practicalMotorPowerKW', 0.75, e)}
-                    className="w-full px-2.5 py-1.5 border border-amber-300 rounded font-mono font-bold text-amber-900 bg-white"
-                  />
+                  <NumericField value={inputs.practicalMotorPowerKW} onCommit={(v) => update('practicalMotorPowerKW', v)}
+                    min={0.25} max={7.5}
+                    step={0.1} className="w-full px-2.5 py-1.5 border border-amber-300 rounded font-mono font-bold text-amber-900 bg-white" />
                   <span className="text-[10px] text-slate-400">0.75 kW (1.0 HP with VFD)</span>
                 </div>
 
@@ -1562,15 +1355,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <label className="text-[11px] font-semibold text-slate-700 block mb-1">
                     Shaft Diameter (mm)
                   </label>
-                  <input
-                    type="number"
-                    min={20}
-                    max={100}
-                    step={1}
-                    value={numericValue('screwShaftDiameterMm', 38)}
-                    onChange={(e) => updateNumeric('screwShaftDiameterMm', 38, e)}
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold"
-                  />
+                  <NumericField value={inputs.screwShaftDiameterMm} onCommit={(v) => update('screwShaftDiameterMm', v)}
+                    min={20} max={100}
+                    step={1} className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold" />
                   <span className="text-[10px] text-slate-400">Ref: 38 mm (~1.5 in)</span>
                 </div>
               </div>

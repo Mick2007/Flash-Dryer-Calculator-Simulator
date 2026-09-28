@@ -1973,7 +1973,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     `${screwCapacityMarginPercent >= 0 ? '+' : ''}${screwCapacityMarginPercent.toFixed(1)}% Capacity Margin`,
     'CEMA Standard 300 / Kuye et al. (2011)',
     'Calculated',
-    `Provides positive ${(actualCapacityKgH - feedRateKgH).toFixed(1)} kg/h delivery reserve, guaranteeing non-choking operation.`
+    `Provides a positive ${(actualCapacityKgH - feedRateKgH).toFixed(1)} kg/h delivery reserve above the required feed rate, giving margin against choking. The reserve is a design margin, not a guarantee: choking also depends on screw condition, product temperature and hopper surge, none of which is a steady-state calculation.`
   );
 
   addStep(
@@ -2333,7 +2333,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     `${cycloneVortexFinderLengthMm} mm (Inlet height a = ${cycloneInletHeightMm} mm; S >= a satisfied)`,
     'Stairmand (1951) / Lapple (1951) Standard Cyclone Proportions',
     'Calculated',
-    `Extending S = ${cycloneVortexFinderLengthMm} mm (>= a = ${cycloneInletHeightMm} mm) guarantees that unseparated raw feed cannot bypass directly from the inlet into the exhaust stack.`
+    `Extending S = ${cycloneVortexFinderLengthMm} mm (>= a = ${cycloneInletHeightMm} mm) prevents the short-circuit path in which unseparated feed passes from the inlet straight to the exhaust. It does not by itself establish collection: the cut point still assumes the vortex is established, and the single-dust efficiency is reported separately on that basis.`
   );
 
   // 6. CYCLONE UPPER CYLINDRICAL BARREL HEIGHT (h)

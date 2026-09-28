@@ -1559,7 +1559,7 @@ export function extractParametricModel(results: CalculationResults): ParametricM
       colorHex: feederGaugePa > 50 ? '#ef4444' : feederGaugePa < -50 ? '#6366f1' : '#10b981',
       description:
         pressureMode === 'balanced'
-          ? 'Neutral Pressure Point (0 Pa gauge) — zero dust blowback & zero in-leakage'
+          ? 'Neutral Pressure Point (0 Pa gauge) — no net pressure bias either way'
           : pressureMode === 'negative'
           ? `Negative pressure (−${Math.abs(feederGaugePa)} Pa) draws wet mash inward`
           : `Positive pressure (+${feederGaugePa} Pa) requires sealed feeder to avoid blowback`,
