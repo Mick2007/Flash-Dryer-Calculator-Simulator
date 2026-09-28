@@ -1,0 +1,339 @@
+@import "tailwindcss";
+
+/* =========================================================
+   DESIGN TOKENS — "worksheet" register
+   Subject: a shop-floor engineering instrument for sizing
+   cassava flash-drying plant. Anodised metal, brass valve
+   fittings, engraved scales, ruled drafting film.
+   One accent (brass). Colour carries STATE only.
+   ========================================================= */
+@theme {
+  /* Surfaces */
+  --color-paper: #ecede8;
+  --color-paper-raised: #f5f5f1;
+  --color-paper-sunk: #e2e3dc;
+
+  /* Ink */
+  --color-graphite: #1c1a17;
+  --color-graphite-soft: #4a4741;
+  --color-graphite-faint: #8b877e;
+
+  /* Rules */
+  --color-rule: #c9c8c0;
+  --color-rule-strong: #a8a79d;
+
+  /* The single accent — aged brass valve fittings */
+  --color-brass: #8a6a2f;
+  --color-brass-bright: #a8853c;
+  --color-brass-wash: #f0ebe0;
+
+  /* State: pass — verdigris patina, not emerald */
+  --color-verdigris: #2f6b5e;
+  --color-verdigris-wash: #e4ece8;
+
+  /* State: fault — rusted steel, not amber */
+  --color-oxide: #9c4221;
+  --color-oxide-wash: #f5e8e2;
+
+  /* State: advisory — graphite, deliberately quiet */
+  --color-advisory: #6b6862;
+
+  /* Type */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, ui-serif, serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+
+  --radius-sheet: 3px;
+}
+
+/* =========================================================
+   LEGACY PALETTE ALIAS
+   ------------------------------------------------------------
+   The components that were not rewritten still carry Tailwind's
+   default slate/emerald/sky/amber classes. Remapping the palette
+   scales here brings them onto the worksheet tokens in one place
+   instead of ~200 fragile per-file edits that would rot on the
+   next change.
+
+   Mapping intent:
+     slate   -> warm graphite ink ramp (paper at the light end)
+     emerald -> verdigris (the "passes" colour)
+     amber   -> oxide     (the "fault" colour)
+     rose    -> oxide     (danger variants)
+     sky     -> brass     (the single accent)
+   ========================================================= */
+@theme {
+  /* Neutral ink ramp: light end is paper, dark end is graphite. */
+  --color-slate-50: #f5f5f1;
+  --color-slate-100: #ecede8;
+  --color-slate-200: #dedfd7;
+  --color-slate-300: #c9c8c0;
+  --color-slate-400: #a8a79d;
+  --color-slate-500: #8b877e;
+  --color-slate-600: #6b6862;
+  --color-slate-700: #4a4741;
+  --color-slate-800: #33302b;
+  --color-slate-900: #1c1a17;
+  --color-slate-950: #131210;
+
+  /* Pass / safe -> verdigris. */
+  --color-emerald-50: #eef4f1;
+  --color-emerald-100: #e4ece8;
+  --color-emerald-200: #cdded7;
+  --color-emerald-300: #aac9bd;
+  --color-emerald-400: #7aab9a;
+  --color-emerald-500: #2f6b5e;
+  --color-emerald-600: #275a4f;
+  --color-emerald-700: #1f4840;
+  --color-emerald-800: #173730;
+  --color-emerald-900: #112723;
+  --color-emerald-950: #0a1a17;
+
+  /* Fault / caution -> oxide. */
+  --color-amber-50: #f8f0ec;
+  --color-amber-100: #f5e8e2;
+  --color-amber-200: #e8cdc1;
+  --color-amber-300: #d4a692;
+  --color-amber-400: #b57a62;
+  --color-amber-500: #9c4221;
+  --color-amber-600: #84371b;
+  --color-amber-700: #6b2c16;
+  --color-amber-800: #532210;
+  --color-amber-900: #3b190c;
+  --color-amber-950: #260f07;
+
+  /* Danger -> oxide, kept slightly deeper so it reads more severe. */
+  --color-rose-50: #f8efec;
+  --color-rose-100: #f4e3dd;
+  --color-rose-200: #e5c3b6;
+  --color-rose-300: #cf9b88;
+  --color-rose-400: #b3705a;
+  --color-rose-500: #8f3a1c;
+  --color-rose-600: #7a3017;
+  --color-rose-700: #622713;
+  --color-rose-800: #491c0d;
+  --color-rose-900: #311207;
+  --color-rose-950: #1d0b04;
+
+  /* Accent / highlight -> brass. */
+  --color-sky-50: #f6f2ea;
+  --color-sky-100: #f0ebe0;
+  --color-sky-200: #e3d8c2;
+  --color-sky-300: #cfbc98;
+  --color-sky-400: #b39a6c;
+  --color-sky-500: #8a6a2f;
+  --color-sky-600: #755927;
+  --color-sky-700: #5e471f;
+  --color-sky-800: #483718;
+  --color-sky-900: #312611;
+  --color-sky-950: #1e1708;
+
+  /* Residual single-hue shades. */
+  --color-teal-400: #2f6b5e;
+  --color-indigo-50: #f0ebe0;
+  --color-indigo-100: #e6dcc6;
+  --color-indigo-200: #d8c69f;
+  --color-indigo-300: #c0a76f;
+  --color-indigo-400: #a8853c;
+  --color-indigo-500: #8a6a2f;
+  --color-indigo-600: #755927;
+  --color-indigo-700: #5e471f;
+  --color-indigo-800: #483718;
+  --color-indigo-900: #312611;
+  --color-violet-100: #e6dcc6;
+  --color-violet-200: #d8c69f;
+  --color-violet-300: #c0a76f;
+  --color-violet-400: #a8853c;
+  --color-violet-500: #8a6a2f;
+  --color-violet-600: #755927;
+  --color-violet-700: #5e471f;
+  --color-violet-800: #483718;
+  --color-violet-900: #312611;
+  --color-purple-100: #e6dcc6;
+  --color-purple-200: #d8c69f;
+  --color-purple-300: #c0a76f;
+  --color-purple-400: #a8853c;
+  --color-purple-500: #8a6a2f;
+  --color-purple-600: #755927;
+  --color-purple-700: #5e471f;
+  --color-purple-800: #483718;
+  --color-purple-900: #312611;
+}
+
+/* =========================================================
+   BASE
+   ========================================================= */
+html {
+  background-color: var(--color-paper);
+}
+
+body {
+  background-color: var(--color-paper);
+  color: var(--color-graphite);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Every measured quantity is monospace; every word is sans or serif.
+   This single rule is what makes the surface read as an instrument. */
+.qty {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 1;
+  letter-spacing: -0.01em;
+}
+
+/* The derivation chain is long-form argument — set it as prose. */
+.argument {
+  font-family: var(--font-serif);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--color-graphite-soft);
+  max-width: 68ch;
+}
+
+.argument .eq {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-graphite);
+}
+
+/* =========================================================
+   SHADOW NEUTRALISATION
+   ------------------------------------------------------------
+   This design system separates with hairlines and paper tone,
+   never with drop shadows. The unrewritten components still
+   carry shadow-xs/sm/md/lg/xl/2xs/inner, so they are collapsed
+   here. Remove this block once every component is migrated.
+   ========================================================= */
+@layer utilities {
+  :where(.shadow-xs, .shadow-sm, .shadow, .shadow-md, .shadow-lg, .shadow-xl, .shadow-2xl, .shadow-2xs, .shadow-inner) {
+    box-shadow: none !important;
+  }
+}
+
+/* Hairline rule. Structure, not decoration. */
+.rule-t { border-top: 1px solid var(--color-rule); }
+.rule-b { border-bottom: 1px solid var(--color-rule); }
+.rule-l { border-left: 1px solid var(--color-rule); }
+.rule-r { border-right: 1px solid var(--color-rule); }
+
+/* Focus ring — visible, brass, consistent. Non-negotiable floor. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brass);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Screen-reader-only, for labels the layout carries visually elsewhere. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* Respect reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+::selection {
+  background: var(--color-brass-wash);
+  color: var(--color-graphite);
+}
+
+/* =========================================================
+   NATIVE COMPUTER BROWSER PRINT ENGINE STYLES (Save as PDF)
+   ========================================================= */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 14mm 12mm 14mm 12mm;
+  }
+
+  html, body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    font-size: 11pt !important;
+    line-height: 1.4 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Reset modal overlay positioning for clean continuous multi-page printing */
+  .print-dialog-overlay {
+    position: static !important;
+    display: block !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-height: auto !important;
+  }
+
+  .print-dialog-card {
+    position: static !important;
+    display: block !important;
+    overflow: visible !important;
+    max-height: none !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    background: #ffffff !important;
+  }
+
+  .print-page-break-avoid {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .print-page-break-before {
+    break-before: page !important;
+    page-break-before: always !important;
+  }
+
+  /* Force table formatting in print */
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    break-inside: auto;
+  }
+
+  tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  thead {
+    display: table-header-group !important;
+  }
+
+  /* Remove scrollbars, shadows and web artifacts */
+  * {
+    box-shadow: none !important;
+    text-shadow: none !important;
+  }
+}
