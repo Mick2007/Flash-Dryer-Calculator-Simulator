@@ -2186,6 +2186,41 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   const cycloneTotalHeightMm = Math.round(cycloneDiameterMm * cycloneRatios.totalHeight_H);
   const cycloneDustOutletDiameterMm = Math.round(cycloneDiameterMm * cycloneRatios.dustOutletDiameter_B);
 
+  // ITEM 23 (part 1): the rotary airlock diameter, computed once here so the PDF,
+  // the DXF and the 3D model all consume the same figure.
+  //
+  // The PDF previously stated "Size: 150 mm / 6-inch rotor" as fixed text while
+  // the cyclone spigot below is 456 mm and the 3D model drew the rotor from the
+  // spigot. Three deliverables, three different airlock sizes.
+  //
+  // Sizing rule: the airlock rotor must be at least as large as the spigot it
+  // discharges from, or the spigot itself becomes the restriction. Rounded UP to
+  // the next size in the nominal rotary-valve series so the valve is a catalogue
+  // item rather than a made-up dimension.
+  //
+  // The series below is a nominal commercial size range, not a published
+  // standard; it is disclosed in assumedParameters and should be checked against
+  // the vendor's actual size list before ordering. Rounding up means a real
+  // valve is available at or above the computed requirement.
+  //
+  // BEYOND THE LARGEST CATALOGUE SIZE. A very large cyclone produces a spigot
+  // wider than any single rotary valve, because B scales with the barrel
+  // diameter. A single rotary airlock is then not the right device at all — real
+  // practice is a slide gate, a double-cone valve, or several airlocks on a
+  // manifold. Rather than silently cap the valve below the spigot (which would
+  // make the valve the restriction, the exact fault this sizing exists to avoid),
+  // the computed size is held at the spigot diameter and the shortfall is
+  // reported so the arrangement gets reviewed.
+  const ROTARY_VALVE_NOMINAL_SIZES_MM = [
+    100, 125, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000,
+  ];
+  const catalogueAirlockMm = ROTARY_VALVE_NOMINAL_SIZES_MM.find(
+    (s) => s >= cycloneDustOutletDiameterMm,
+  );
+  const airlockDiameterMm = catalogueAirlockMm ?? cycloneDustOutletDiameterMm;
+  // True when no catalogue valve covers the spigot and the arrangement needs review.
+  const airlockExceedsCatalogue = catalogueAirlockMm === undefined;
+
   const actualCycloneInletAreaM2 = Math.max(0.001, (cycloneInletHeightMm * cycloneInletWidthMm) / 1e6);
   const cycloneInletVelocityMperS = outletVolumetricFlowM3S / actualCycloneInletAreaM2;
   const cyclonePressureDropPa = Math.max(50, Math.round(cycloneRatios.eulerNumber_Eu * 0.5 * outletAirDensity * Math.pow(cycloneInletVelocityMperS, 2)));
@@ -2893,6 +2928,13 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     cycloneDustOutletDiameterMm,
     cycloneInletVelocityMperS,
     cyclonePressureDropPa,
+    // ITEM 19: exposed so the DXF label quotes the computed efficiency instead of
+    // a hardcoded figure.
+    cycloneCollectionEfficiencyPercent: Math.round(cycloneCollectionEfficiencyPercent * 10) / 10,
+    cycloneSizeRatio: Math.round(cycloneSizeRatio * 100) / 100,
+    cutPointD50Microns: Math.round(cutPointD50Microns * 100) / 100,
+    // ITEM 23: single airlock size shared by the PDF, DXF and 3D model.
+    airlockDiameterMm,
     fanTotalPressureDropPa,
     fanAirPowerKW,
     fanMotorPowerKW,
@@ -3234,6 +3276,23 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       currentValue: `${safeBulkDensity.toFixed(0)} kg/m3 bulk, ${(bulkVoidageFraction * 100).toFixed(0)}% voidage`,
       recommendedRange: `Voidage ${(BULK_VOIDAGE_MIN * 100).toFixed(0)}-${(BULK_VOIDAGE_MAX * 100).toFixed(0)}%; never above ${(BULK_MAX_FRACTION_OF_PARTICLE * 100).toFixed(0)}% of particle density`,
       source: 'Bulk density bounded by particle density via bed voidage phi = 1 - rho_bulk/rho_particle'
+    });
+  }
+
+  // A spigot wider than the largest catalogue rotary valve means a single rotary
+  // airlock is not an appropriate device. Report it rather than letting the size
+  // sit in the report as though it were an orderable item.
+  if (airlockExceedsCatalogue) {
+    checks.push({
+      id: 'chk-airlock-catalogue',
+      category: 'Geometry',
+      severity: 'warning',
+      status: 'NEEDS REVIEW',
+      title: 'Rotary Airlock Larger Than Catalogue Range',
+      message: `The cyclone spigot is Ø${cycloneDustOutletDiameterMm} mm, wider than the largest nominal rotary valve in the size series used here (Ø${ROTARY_VALVE_NOMINAL_SIZES_MM[ROTARY_VALVE_NOMINAL_SIZES_MM.length - 1]} mm), so no single rotary airlock covers it. A large spigot on a large cyclone is normally discharged through a slide gate, a double-cone valve, or several airlocks on a manifold rather than one rotor. The reported Ø${airlockDiameterMm} mm is held at the spigot so the valve is not the restriction, but the discharge arrangement needs review with the vendor.`,
+      currentValue: `Ø${airlockDiameterMm} mm at the Ø${cycloneDustOutletDiameterMm} mm spigot`,
+      recommendedRange: `Single rotary valve up to Ø${ROTARY_VALVE_NOMINAL_SIZES_MM[ROTARY_VALVE_NOMINAL_SIZES_MM.length - 1]} mm; above that, review the discharge arrangement`,
+      source: 'Nominal rotary valve size series; cyclone spigot ratio B = k_B x D_c',
     });
   }
 
@@ -3946,6 +4005,12 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       id: 'asm-hex-ft', category: 'Process Condition', parameterName: 'LMTD correction factor', symbol: 'F_t',
       value: correctionFactorFt.toFixed(2), unit: '-', basis: correctionFactorBasis,
       rationale: 'Cross-flow exchangers never reach the parallel-flow LMTD, so F < 1 always. Treating cross-flow as F = 1.0 understated the required surface area by roughly 11%.', isUserInput: false,
+    },
+    {
+      id: 'asm-airlock-size', category: 'Process Condition', parameterName: 'Rotary airlock nominal size series', symbol: 'D_rotary',
+      value: `spigot B = ${cycloneDustOutletDiameterMm} mm → airlock Ø${airlockDiameterMm} mm`, unit: 'mm',
+      basis: `Rounded UP to the next size in the nominal rotary-valve series ${ROTARY_VALVE_NOMINAL_SIZES_MM.join('/')} mm`,
+      rationale: 'The airlock rotor must be at least as large as the cyclone spigot it discharges from, or the spigot becomes the restriction. Rounding up gives a catalogue item at or above the requirement. The size series is a commercial range, NOT a published standard, and should be checked against the vendor list before ordering. Previously the PDF stated 150 mm while the spigot was 456 mm and the 3D model used a third figure.', isUserInput: false,
     },
     {
       id: 'asm-horizontal-slip', category: 'Process Condition', parameterName: 'Horizontal-run particle slip factor', symbol: 'k_slip',

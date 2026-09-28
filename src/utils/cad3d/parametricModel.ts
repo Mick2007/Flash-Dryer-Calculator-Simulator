@@ -521,7 +521,11 @@ export function extractParametricModel(results: CalculationResults): ParametricM
 
   // 11. Rotary Airlock Valve & Ground Clearance
   const clearanceBelowAirlockM = 0.45;
-  const airlockRadiusM = Math.max(0.12, cycloneDustOutletRadiusM * 1.15);
+  // ITEM 23: the rotor is sized from the engine's airlock diameter, so the 3D
+  // model, the DXF and the PDF all show the same valve. It previously used
+  // spigotRadius x 1.15, a third figure that matched neither the PDF's 150 mm nor
+  // the spigot it discharges from.
+  const airlockRadiusM = Math.max(0.12, (dimensions.airlockDiameterMm ?? 2 * cycloneDustOutletRadiusM * 1000) / 2000);
   const airlockHeightM = Math.max(0.28, airlockRadiusM * 2.1);
   const airlockMotorLengthM = 0.32;
 

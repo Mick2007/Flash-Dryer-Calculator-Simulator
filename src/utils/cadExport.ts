@@ -40,8 +40,25 @@ export function generateCadDxf(results: CalculationResults): string {
   // Origin layout coordinates in mm
   // Heat Exchanger on left
   const hexX = 1500;
-  const hexWidth = 1400;
-  const hexHeight = 1600;
+  // ITEM 18: the exchanger envelope is derived from the computed bundle, not fixed.
+  //
+  // The casing was hardcoded at 1400 x 1600 mm regardless of the duty, so a 50 kW
+  // heater and a 6000 kW heater were drawn identically. The drawing was therefore
+  // not a fabrication reference for anything but the default case.
+  //
+  // The engine now solves the bundle: casingWidthM across the element rows and
+  // casingHeightM transverse to them, from the open frontal area needed to pass
+  // the air at the design face velocity. Those are the per-pass bundle
+  // dimensions. The shell adds a clearances allowance for casing, baffles and
+  // removal, and the passes share the shell.
+  //
+  // LIMITATION, stated plainly: the arrangement of passes WITHIN the shell
+  // (serpentine, stacked, or split) is a vendor detail. This draws the shell
+  // envelope and the pass divisions; it does not claim to be the vendor's
+  // arrangement. Confirm the internal layout with the exchanger manufacturer.
+  const HEX_CLEARANCE_M = 0.1; // 100 mm total casing/handling clearance per axis
+  const hexWidth = Math.max(600, Math.round((heatExchanger.casingWidthM * 1000 + HEX_CLEARANCE_M * 1000) / 10) * 10);
+  const hexHeight = Math.max(600, Math.round((heatExchanger.casingHeightM * 1000 + HEX_CLEARANCE_M * 1000) / 10) * 10);
   const hexY = 500;
 
   // Venturi & Feeder
@@ -81,6 +98,24 @@ export function generateCadDxf(results: CalculationResults): string {
     lines.push(
       '0', 'SECTION',
       '2', 'TABLES',
+      // ITEM 19: the LTYPE table, which was missing entirely.
+      //
+      // The file declared a CENTERLINES layer and a header comment describing it
+      // as dashed, but assigned the layer the CONTINUOUS linetype. Every
+      // centreline therefore rendered as a solid line indistinguishable from the
+      // equipment outline, and a reader had no way to tell the two apart. The
+      // mismatch was between the file's own comment and its own contents.
+      //
+      // A CENTER linetype is defined here: 1.25 total pattern length, a 0.625
+      // dash and a 0.625 gap, which is the conventional centreline pattern. The
+      // 49 group codes carry the signed pattern segments, and group 73 declares
+      // their count so the reader knows how many to expect.
+      '0', 'TABLE',
+      '2', 'LTYPE',
+      '70', '2',
+      '0', 'LTYPE', '2', 'CONTINUOUS', '70', '0', '3', 'Solid line', '72', '65', '73', '0', '40', '0.0',
+      '0', 'LTYPE', '2', 'CENTER', '70', '0', '3', 'Center ____ _ ____ _ ____ _ ____ _ ____ _ ____', '72', '65', '73', '2', '40', '1.25', '49', '0.625', '49', '-0.625',
+      '0', 'ENDTAB',
       '0', 'TABLE',
       '2', 'LAYER',
       '70', '9',
@@ -94,8 +129,8 @@ export function generateCadDxf(results: CalculationResults): string {
       '0', 'LAYER', '2', 'CYCLONE', '70', '0', '62', '6', '6', 'CONTINUOUS',
       // Layer STRUCTURAL_FRAME
       '0', 'LAYER', '2', 'STRUCTURAL_FRAME', '70', '0', '62', '8', '6', 'CONTINUOUS',
-      // Layer CENTERLINES
-      '0', 'LAYER', '2', 'CENTERLINES', '70', '0', '62', '1', '6', 'CONTINUOUS',
+      // Layer CENTERLINES — now genuinely dashed, matching the header comment.
+      '0', 'LAYER', '2', 'CENTERLINES', '70', '0', '62', '1', '6', 'CENTER',
       // Layer DIMENSIONS
       '0', 'LAYER', '2', 'DIMENSIONS', '70', '0', '62', '2', '6', 'CONTINUOUS',
       // Layer ANNOTATIONS
@@ -117,6 +152,39 @@ export function generateCadDxf(results: CalculationResults): string {
       '11', x2.toFixed(1),
       '21', y2.toFixed(1),
       '31', '0.0'
+    );
+  }
+
+  /**
+   * ITEM 18: a real DXF ARC entity, for the U-bend.
+   *
+   * The U-bend was drawn as two straight lines with `rBend` computed and then
+   * never used — dead code sitting next to the geometry that needed it. A
+   * fabricated spool is not a bend: the drawing showed a sharp 90° corner where
+   * the machine has a 180° return, and the pressure drop in the real bend is not
+   * the pressure drop in a mitered corner.
+   *
+   * Group codes for ARC (R12 / AC1009):
+   *   10/20/30 centre point, 40 radius, 50 start angle, 51 end angle.
+   * Angles are degrees counter-clockwise from the +X axis.
+   */
+  function drawArc(
+    layer: string,
+    cx: number,
+    cy: number,
+    radius: number,
+    startAngleDeg: number,
+    endAngleDeg: number,
+  ) {
+    lines.push(
+      '0', 'ARC',
+      '8', layer,
+      '10', cx.toFixed(1),
+      '20', cy.toFixed(1),
+      '30', '0.0',
+      '40', radius.toFixed(1),
+      '50', startAngleDeg.toFixed(4),
+      '51', endAngleDeg.toFixed(4)
     );
   }
 
@@ -231,10 +299,39 @@ export function generateCadDxf(results: CalculationResults): string {
     drawDimensionH(colX, colX + D_tube, colY + H_riser + 350, `COLUMN DIA: ${D_tube} mm`);
     drawText('ANNOTATIONS', colX + 100, colY + (H_riser / 2), 110, `DRYING RISER (v = ${dimensions.actualAirVelocityMperS.toFixed(1)} m/s, tau = ${dimensions.estimatedResidenceTimeSec.toFixed(2)}s)`);
 
-    // Top U-Bend
-    const rBend = loopSpacing / 2;
-    drawLine('DUCTWORK', colX, colY + H_riser, downX, colY + H_riser);
-    drawLine('DUCTWORK', colX + D_tube, colY + H_riser + D_tube, downX + D_tube, colY + H_riser + D_tube);
+    // Top U-Bend.
+    //
+    // ITEM 18: drawn as a true 180° ARC at the ENGINE's bend radius, not as two
+    // straight lines. The straight-line version was a mitered corner, which is
+    // not the part that gets fabricated, and `rBend` was computed next to it and
+    // then never referenced.
+    //
+    // The bend radius comes from developedLengthReport.bendRadiusM, the same value
+    // the engine costed, so the drawing and the pressure drop describe one bend.
+    // The arc is laid on the tube CENTRELINES: its centre is midway between the
+    // riser and downcomer centrelines, at the elevation of the riser top, and its
+    // radius is half the centreline-to-centreline span.
+    const rBend = (downX - colX) / 2;
+    const bendCentreX = colX + D_tube / 2 + rBend;
+    const bendCentreY = colY + H_riser;
+    // The engine's bend radius governs the ELBOW GEOMETRY; if the sheet layout
+    // cannot physically accommodate it, the layout gives way, because a drawing
+    // that contradicts the specified elbow is worse than a sheet that does not
+    // fit. The fallback is the longest-radius elbow that does fit.
+    const engineBendRadiusMm = (results.developedLengthReport?.bendRadiusM ?? 0) * 1000;
+    const appliedBendRadiusMm = Math.min(engineBendRadiusMm, rBend);
+    const bendRadiusApplied = appliedBendRadiusMm < engineBendRadiusMm;
+    // Upper semicircle: centre plus a point at startAngle 0° (the downcomer side)
+    // sweeping counter-clockwise through 90° (the top) to 180° (the riser side).
+    drawArc('DUCTWORK', bendCentreX, bendCentreY, appliedBendRadiusMm, 0, 180);
+    drawText(
+      'ANNOTATIONS',
+      bendCentreX - appliedBendRadiusMm - 40,
+      bendCentreY + appliedBendRadiusMm * 0.25,
+      70,
+      `U-BEND R = ${appliedBendRadiusMm.toFixed(0)} mm (${(appliedBendRadiusMm / (D_tube || 1)).toFixed(1)}D)` +
+        (bendRadiusApplied ? ' [LIMITED BY SHEET LAYOUT]' : ''),
+    );
 
     // Downcomer Pipe
     drawLine('EQUIPMENT', downX, colY + H_riser, downX, cycY + h_cyl);
@@ -265,14 +362,35 @@ export function generateCadDxf(results: CalculationResults): string {
     drawLine('CYCLONE', cycCenterX + deHalf, cycY + h_cyl - S, cycCenterX + deHalf, cycY + h_cyl + 500);
 
     // Rotary Airlock Valve at Cyclone Discharge
-    drawRect('EQUIPMENT', cycCenterX - B, coneBottomY - 500, B * 2, 500);
-    drawCircle('EQUIPMENT', cycCenterX, coneBottomY - 250, B * 0.7);
-    drawText('ANNOTATIONS', cycCenterX + B + 100, coneBottomY - 250, 80, 'ROTARY AIRLOCK DISCHARGE');
+    // ITEM 23: drawn at the engine's airlock diameter, so the rotor matches the
+    // spigot it discharges from and matches what the PDF states. It was previously
+    // drawn from the raw spigot while the PDF quoted 150 mm.
+    const D_airlock = dimensions.airlockDiameterMm;
+    drawRect('EQUIPMENT', cycCenterX - D_airlock / 2, coneBottomY - 500, D_airlock, 500);
+    drawCircle('EQUIPMENT', cycCenterX, coneBottomY - 250, D_airlock * 0.35);
+    drawText('ANNOTATIONS', cycCenterX + D_airlock / 2 + 100, coneBottomY - 250, 80, `ROTARY AIRLOCK Ø${D_airlock} mm`);
 
     // Cyclone Dimensions & Labels
     drawDimensionH(cycX, cycX + D_cyclone, cycY + h_cyl + 800, `CYCLONE DIA: ${D_cyclone} mm`);
     drawDimensionV(coneBottomY, cycY + h_cyl, cycX + D_cyclone + 400, `TOTAL CYCLONE H: ${H_cyclone} mm`);
-    drawText('ANNOTATIONS', cycX + 100, cycY + (h_cyl / 2), 100, `${dimensions.cycloneType.toUpperCase()} CYCLONE (EFF > 98.5%)`);
+    // ITEM 19: the computed collection efficiency, not a hardcoded 98.5%.
+    // The figure was fixed regardless of the design, so a cyclone that actually
+    // collects 78% was labelled 98.5% on the drawing. The efficiency is a
+    // function of d_p/d50 and is now exposed by the engine.
+    drawText(
+      'ANNOTATIONS',
+      cycX + 100,
+      cycY + (h_cyl / 2),
+      100,
+      `${dimensions.cycloneType.toUpperCase()} CYCLONE (SINGLE-DUST EFF ${dimensions.cycloneCollectionEfficiencyPercent.toFixed(1)}%)`,
+    );
+    drawText(
+      'ANNOTATIONS',
+      cycX + 100,
+      cycY + (h_cyl / 2) - 130,
+      70,
+      `d50 = ${dimensions.cutPointD50Microns.toFixed(1)} um | d_p/d50 = ${dimensions.cycloneSizeRatio.toFixed(2)}`,
+    );
 
     // 7. Exhaust Duct & Centrifugal Fan
     drawLine('DUCTWORK', cycCenterX + deHalf, cycY + h_cyl + 500, blowX, cycY + h_cyl + 500);
@@ -317,7 +435,13 @@ export function generateCadDxf(results: CalculationResults): string {
     drawText('TITLE_BLOCK', tbX + 100, tbY + 120, 70, `CIRAD (2015) & IITA (2011) METHODOLOGY | https://flashdryer.cirad.fr/design-tools`);
 
     drawText('TITLE_BLOCK', tbX + 2100, tbY + 850, 85, `DATE: ${new Date().toISOString().split('T')[0]}`);
-    drawText('TITLE_BLOCK', tbX + 2100, tbY + 680, 85, 'SCALE: 1:50 (METRIC MM)');
+    // ITEM 20: the scale label was flatly wrong. The DXF is written in true
+    // millimetres at 1:1 — every coordinate in this file is the real dimension of
+    // the machine — but the title block claimed "SCALE: 1:50". Anyone plotting or
+    // measuring the sheet at face value would have sized the plant 50x wrong.
+    // The model has no plot scale; that is set when the file is opened in CAD.
+    drawText('TITLE_BLOCK', tbX + 2100, tbY + 680, 85, 'MODEL SPACE 1:1, UNITS mm - SET PLOT SCALE WHEN PRINTING');
+    drawText('TITLE_BLOCK', tbX + 2100, tbY + 590, 70, 'ALL DIMENSIONS IN MILLIMETRES');
     drawText('TITLE_BLOCK', tbX + 2100, tbY + 370, 85, `HEX PASSES: ${passes} PASSES (${heatExchanger.surfaceAreaM2.toFixed(1)} m2)`);
     drawText('TITLE_BLOCK', tbX + 2100, tbY + 120, 85, 'DRAWING NO: CIRAD-FD-2026-001');
 
@@ -385,7 +509,15 @@ export function generateCadSvg(results: CalculationResults): string {
 
     <text x="15" y="26" fill="#ffffff" font-size="14" font-weight="bold">CASSAVA FLASH DRYER SYSTEM (HQCF)</text>
     <text x="15" y="62" fill="#93c5fd" font-size="11">REF: CIRAD PILOT (2015) &amp; IITA (2011)</text>
-    <text x="15" y="102" fill="#e2e8f0" font-size="11">CAD SCALE: 1:50 | UNITS: mm</text>
+    <!-- ITEM 20. This sheet is a presentational SCHEMATIC: the geometry below is
+         drawn in fixed sheet coordinates and does NOT scale with the design, while
+         the labels are driven by the computed results. Labelling it 1:50 was simply
+         false - there is no such scale in the file. It now says what it is, and
+         points at the DXF for dimensioned geometry. Scaling the sheet properly
+         would mean re-laying out every element against the real dimensions, which
+         is a drawing exercise rather than a label fix. -->
+    <text x="15" y="102" fill="#e2e8f0" font-size="11">SCHEMATIC - NOT TO SCALE | LABELS ARE COMPUTED</text>
+    <text x="15" y="118" fill="#64748b" font-size="8">Dimensioned 1:1 geometry: use the DXF export</text>
     <text x="15" y="142" fill="#38bdf8" font-size="10">https://flashdryer.cirad.fr/design-tools</text>
 
     <text x="295" y="62" fill="#fbbf24" font-size="11" font-weight="bold">HEX PASSES: ${passes}</text>
@@ -475,7 +607,10 @@ export function generateCadSvg(results: CalculationResults): string {
       DIA: ${D_cyclone} mm | H: ${H_cyclone} mm
     </text>
     <text x="100" y="490" fill="#4ade80" font-size="10" font-weight="bold" text-anchor="middle">
-      ROTARY AIRLOCK DISCHARGE
+      ROTARY AIRLOCK Ø${dimensions.airlockDiameterMm} mm
+    </text>
+    <text x="100" y="118" fill="#f5d0fe" font-size="9" text-anchor="middle">
+      EFF ${dimensions.cycloneCollectionEfficiencyPercent.toFixed(1)}% (d50 ${dimensions.cutPointD50Microns.toFixed(1)} µm)
     </text>
 
     <!-- Diameter Dimension -->

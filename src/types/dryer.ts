@@ -504,6 +504,24 @@ export interface DryerDimensions {
   cycloneDustOutletMm?: number;
   cycloneInletVelocityMperS: number;
   cyclonePressureDropPa: number;
+  /**
+   * ITEM 19: single-dust collection efficiency from the Lapple curve, %.
+   *
+   * Was a local variable in the engine, so the DXF label had to hardcode a
+   * figure. Exposed here so the drawing quotes the computed value.
+   */
+  cycloneCollectionEfficiencyPercent: number;
+  /** d_p / d50 size ratio driving that efficiency. */
+  cycloneSizeRatio: number;
+  /** Cut-point diameter d50, µm. */
+  cutPointD50Microns: number;
+  /**
+   * ITEM 23: rotary airlock rotor diameter, mm.
+   *
+   * Computed once from the cyclone spigot and rounded up to the nominal rotary
+   * valve series, so the PDF, the DXF and the 3D model all state the same size.
+   */
+  airlockDiameterMm: number;
 
   // Blower / Fan sizing
   fanTotalPressureDropPa: number;
