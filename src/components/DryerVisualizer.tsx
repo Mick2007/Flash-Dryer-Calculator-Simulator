@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { extractParametricModel } from '../utils/cad3d/parametricModel';
 import {
   Eye,
   Rotate3d,
@@ -104,6 +105,14 @@ export const DryerVisualizer: React.FC<DryerVisualizerProps> = ({ results, onSel
   const D_venturi_mm = Number.isFinite(dimensions?.venturiThroatDiameterMm) ? dimensions.venturiThroatDiameterMm : Math.round(D_tube_mm * 0.75);
   const D_screw_mm = Number.isFinite(dimensions?.screwDiameterMm) ? dimensions.screwDiameterMm : 150;
 
+  // ITEM 16: the 3D model's own centreline length, for display against the engine
+  // figure. Extracted here so the readout can state whether the drawing actually
+  // matches the design. The parametric model is the same object the viewer builds
+  // from, so these numbers describe the assembly on screen.
+  const parametricModel = useMemo(() => extractParametricModel(results), [results]);
+  const modelCenterlineM = parametricModel.pipeCenterlineLengthM;
+  const modelLengthDeltaPercent = parametricModel.pipeLengthDifferencePercent;
+
   // Component description & engineering specifications lookup
   const getComponentDetails = (comp: string) => {
     switch (comp) {
@@ -119,6 +128,10 @@ export const DryerVisualizer: React.FC<DryerVisualizerProps> = ({ results, onSel
             { label: 'Calculated Required Diameter', val: `Ø${dimensions.tubeDiameterCalculatedMm.toFixed(1)} mm (Theoretical requirement)` },
             { label: 'Riser Height', val: `${H_col_m.toFixed(1)} meters (CIRAD Standard)` },
             { label: 'Total Developed Length', val: `${dimensions.totalPipeLengthM.toFixed(1)} meters (CIRAD L ≥ 20m)` },
+            // ITEM 16: the 3D model's own centreline length, against the engine
+            // figure. This was computed and discarded, so a model that was 3.5 m
+            // short of the design still looked correct. It is now shown.
+            { label: '3D Model Centreline', val: `${modelCenterlineM.toFixed(2)} m modelled (${modelLengthDeltaPercent >= 0 ? '+' : ''}${modelLengthDeltaPercent.toFixed(2)}% vs design)` },
             { label: 'Actual Air Velocity', val: `${dimensions.actualAirVelocityMperS.toFixed(1)} m/s` },
             { label: 'Residence Time', val: `${dimensions.estimatedResidenceTimeSec.toFixed(2)} seconds` },
             { label: 'Fabrication Schedule', val: 'Nominal size is a selected standard fabrication value; final verification required' },

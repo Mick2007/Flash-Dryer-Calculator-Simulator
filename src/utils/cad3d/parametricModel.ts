@@ -352,8 +352,26 @@ export function extractParametricModel(results: CalculationResults): ParametricM
       ? dimensions.totalPipeLengthM
       : Math.max(20.0, riserHeightM * 2.2);
 
-  // 3D Long-Radius Swept Elbow Radius
-  const bendRadiusM = Math.max(0.40, pipeRadiusM * 2.5);
+  // ITEM 17: the 3D bend radius is now taken from the calculation engine rather
+  // than re-derived in the geometry module.
+  //
+  // It was previously `max(0.40, pipeRadius x 2.5)`, which is 1.25 D because the
+  // pipe radius is half the diameter. The engine sizes the elbow at
+  // bendRadiusRatio x D, default 2.0 D, which is a long-radius ASME B16.9
+  // 3D bend. The two disagreed by 60%, so the 3D model drew a tighter elbow than
+  // the one the engine costed and the one the fabrication report specified: a
+  // 1.25 D bend has a much higher pressure drop than a 2 D bend at the same
+  // angle, and that pressure drop feeds the fan power. The drawing was therefore
+  // not the machine being costed.
+  //
+  // developedLengthReport.bendRadiusM is authoritative, so changing the engine's
+  // bend radius ratio changes the model, the elbow arc lengths used in the
+  // centerline length, and the fabrication report together.
+  const engineBendRadiusM = results.developedLengthReport?.bendRadiusM;
+  const bendRadiusM =
+    Number.isFinite(engineBendRadiusM) && engineBendRadiusM > 0
+      ? engineBendRadiusM
+      : Math.max(0.40, pipeRadiusM * 2.0); // fallback: long-radius 2 D elbow
   const loopOffsetZM = -bendRadiusM * 2.0;
 
   // Consistent Centerline Elevation Logic:
@@ -620,12 +638,87 @@ export function extractParametricModel(results: CalculationResults): ParametricM
     centerlinePoints.push({ x: riserX, y, z });
   }
 
+  // ITEM 16: the 3D routing must reproduce the engine's developed length.
+  //
+  // The centreline previously ran venturi -> base elbow -> riser -> U-bend ->
+  // downcomer -> transition, with no horizontal run at all. The engine's
+  // single_loop layout puts only the column height in the riser and the balance
+  // in a horizontal spool, so the 3D model came out about 3.5 m SHORT: 16.5 m
+  // against the engine's 20 m. The drawing was not the machine being costed, and
+  // the shortfall was computed into pipeLengthDifferencePercent and then never
+  // displayed, so it was invisible.
+  //
+  // A horizontal run is inserted between the U-bend and the downcomer, matching
+  // the engine's `seg-loop-straight`.
+  //
+  // The run length is not simply the deficit. Moving the downcomer out by runX
+  // shortens the transition into the cyclone by almost the same amount, so simply
+  // adding the deficit would land back at the original total. The run is therefore
+  // solved for, by bisection on
+  //
+  //     runX + transitionLength(runX) = target - (everything else)
+  //
+  // The left side is monotonically increasing in runX — the run grows linearly
+  // while the transition shrinks by no more than the same amount, by the triangle
+  // inequality — so the bracket is unique and bisection cannot diverge or stall.
+  // Ten iterations give well under a millimetre.
+  const l_base_elbow_est = (Math.PI / 2) * bendRadiusM;
+  const l_riser_est = riserHeightM;
+  const l_top_ubend_est = Math.PI * bendRadiusM;
+  const l_downcomer_est = riserTopYM - downcomerExitY;
+  const l_venturi_duct_est = venturiDivLengthM + venturiConvLengthM + venturiThroatLengthM + hotAirDuctLengthM;
+  // Everything in the total that is not the horizontal run or the transition.
+  const lengthExcludingRunAndTransition =
+    l_base_elbow_est + l_riser_est + l_top_ubend_est + l_downcomer_est + l_venturi_duct_est;
+
+  // Transition length as a function of how far the downcomer is offset in X.
+  const transitionLengthFor = (runX: number): number =>
+    Math.hypot(cycloneInletFlangePoint.x - (riserX + runX), cycloneInletYM - downcomerExitY);
+  // The portion of the total that the run and the transition must together supply.
+  //
+  // NOTE this is `runX + transition`, NOT the full total. An earlier version
+  // compared the FULL produced length against this partial target, so
+  // lengthExcludingRunAndTransition was counted on both sides. The bisection then
+  // saw an objective already far above target at every point, collapsed the
+  // bracket to zero, and silently added no run at all — which is why the centreline
+  // stayed at 18.82 m and the run appeared to do nothing.
+  const targetRemaining = totalLengthM - lengthExcludingRunAndTransition;
+  const runPlusTransition = (runX: number): number => runX + transitionLengthFor(runX);
+
+  // If the geometry already supplies the target without a run, leave the routing
+  // exactly as it was. This happens for a tall riser, where the engine's own
+  // layout also caps the riser at the column height.
+  let horizontalRunM = 0;
+  if (runPlusTransition(0) < targetRemaining - 0.01) {
+    // Bracket. runPlusTransition is monotonically increasing in runX: the run grows
+    // linearly and the transition shrinks by no more than the same amount, by the
+    // triangle inequality. So a bracket on the objective has exactly one root.
+    let lo = 0;
+    let hi = Math.max(0.1, targetRemaining);
+    for (let i = 0; i < 80; i++) {
+      const mid = (lo + hi) / 2;
+      if (runPlusTransition(mid) < targetRemaining) lo = mid;
+      else hi = mid;
+    }
+    horizontalRunM = (lo + hi) / 2;
+  }
+
+  const downcomerX = riserX + horizontalRunM;
+
+  // Horizontal run from the U-bend exit to the top of the downcomer. Two
+  // intermediate points so the pipe renders as a straight run rather than a single
+  // long segment.
+  if (horizontalRunM > 0.01) {
+    centerlinePoints.push({ x: riserX + horizontalRunM * 0.5, y: riserTopYM, z: downcomerZ });
+    centerlinePoints.push({ x: downcomerX, y: riserTopYM, z: downcomerZ });
+  }
+
   // Downcomer vertical descent
-  centerlinePoints.push({ x: riserX, y: (riserTopYM + downcomerExitY) * 0.5, z: downcomerZ });
-  centerlinePoints.push({ x: riserX, y: downcomerExitY, z: downcomerZ });
+  centerlinePoints.push({ x: downcomerX, y: (riserTopYM + downcomerExitY) * 0.5, z: downcomerZ });
+  centerlinePoints.push({ x: downcomerX, y: downcomerExitY, z: downcomerZ });
 
   // Smooth horizontal transition entering cyclone tangential inlet flange
-  centerlinePoints.push({ x: (riserX + cycloneInletFlangePoint.x) * 0.5, y: (downcomerExitY + cycloneInletYM) * 0.5, z: downcomerZ });
+  centerlinePoints.push({ x: (downcomerX + cycloneInletFlangePoint.x) * 0.5, y: (downcomerExitY + cycloneInletYM) * 0.5, z: downcomerZ });
   centerlinePoints.push({ x: cycloneInletFlangePoint.x, y: cycloneInletYM, z: downcomerZ });
 
   // Calculate true developed centerline length
@@ -633,12 +726,18 @@ export function extractParametricModel(results: CalculationResults): ParametricM
   const l_riser = riserHeightM;
   const l_top_ubend = Math.PI * bendRadiusM;
   const l_downcomer = riserTopYM - downcomerExitY;
-  const l_transition = Math.hypot(cycloneInletFlangePoint.x - riserX, cycloneInletYM - downcomerExitY);
+  const l_horizontal_run = horizontalRunM;
+  const l_transition = transitionLengthFor(horizontalRunM);
   const l_venturi_duct = venturiDivLengthM + venturiConvLengthM + venturiThroatLengthM + hotAirDuctLengthM;
   const pipeCenterlineLengthM =
-    Math.round((l_base_elbow + l_riser + l_top_ubend + l_downcomer + l_transition + l_venturi_duct) * 100) / 100;
+    Math.round(
+      (l_base_elbow + l_riser + l_top_ubend + l_downcomer + l_horizontal_run + l_transition + l_venturi_duct) * 100,
+    ) / 100;
+  // Signed, not absolute. The absolute form hid the direction of the error; a
+  // signed value is what a reviewer needs to see, and it is now displayed in the
+  // viewer rather than computed and discarded.
   const pipeLengthDifferencePercent =
-    Math.round((Math.abs(pipeCenterlineLengthM - totalLengthM) / Math.max(0.1, totalLengthM)) * 1000) / 10;
+    Math.round(((pipeCenterlineLengthM - totalLengthM) / Math.max(0.1, totalLengthM)) * 1000) / 10;
 
   // 15B. Wet Feed Centerline Flow Path (Hopper -> Screw Barrel -> Drop Chute -> Venturi Throat)
   const feedCenterlinePoints: { x: number; y: number; z: number }[] = [

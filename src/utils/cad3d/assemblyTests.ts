@@ -269,13 +269,37 @@ export function executeTestCase(testCase: AssemblyTestCaseDefinition): TestCaseE
     details.push('Found invalid NaN, zero, or negative dimension value in model.');
   }
 
+  // ITEM 16: the 3D model must reproduce the engine's developed length.
+  //
+  // The centreline was previously built from the riser and the elbows alone, with
+  // no horizontal run, so it came out 16.5 m against the engine's 20 m. The
+  // shortfall was computed into model.pipeLengthDifferencePercent and then never
+  // displayed or asserted, so the model passed every test while drawing a
+  // different machine from the one being costed. This makes it a gate.
+  //
+  // Tolerance is 2%. The routing solves the run length analytically, so the
+  // residual is rounding only and lands at 0.0%; the 2% band exists to absorb
+  // floating-point and the 0.01 m rounding applied to the reported total.
+  const lengthMismatchFraction =
+    Math.abs(model.pipeCenterlineLengthM - model.totalLengthM) / Math.max(0.1, model.totalLengthM);
+  const lengthWithinTolerance = lengthMismatchFraction <= 0.02;
+  if (!lengthWithinTolerance) {
+    details.push(
+      `3D centreline is ${model.pipeCenterlineLengthM.toFixed(2)} m against an engine ` +
+        `developed length of ${model.totalLengthM.toFixed(2)} m ` +
+        `(${(lengthMismatchFraction * 100).toFixed(1)}% out, limit 2%). The drawing is ` +
+        `not the machine being costed.`,
+    );
+  }
+
   const passed =
     requiredComponentsPresent &&
     requiredPortsPresent &&
     allJointsConnected &&
     gapWithinTolerance &&
     angleWithinTolerance &&
-    hasNoNaNOrZero;
+    hasNoNaNOrZero &&
+    lengthWithinTolerance;
 
   const validationMessage = passed
     ? `PASSED: 9/9 Joints Connected (Max Gap: ${maxGapMm.toFixed(1)}mm, Max Angle: ${maxAngleDeg.toFixed(1)}°)`
