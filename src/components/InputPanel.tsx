@@ -16,7 +16,7 @@ import {
   Wrench
 } from 'lucide-react';
 import { DryerInputs, CycloneType, DesignMethodology, PressureSystemType } from '../types/dryer';
-import { CIRAD_PILOT_BENCHMARK, MATERIAL_PROPERTY_PRESETS } from '../utils/constants';
+import { CIRAD_PILOT_BENCHMARK, MATERIAL_PROPERTY_PRESETS, CIRAD_BENCHMARKS } from '../utils/constants';
 
 interface InputPanelProps {
   inputs: DryerInputs;
@@ -665,7 +665,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <span className="absolute right-3 top-2 text-xs font-semibold text-slate-400">m/s</span>
                 </div>
                 <p className="text-[11px] text-slate-500 mt-1">
-                  CIRAD validated range: 12 - 18 m/s (15 m/s tested benchmark)
+                  CIRAD validated range: {CIRAD_BENCHMARKS.recommendedAirVelocityMinMperS.toFixed(0)} - {CIRAD_BENCHMARKS.recommendedAirVelocityMaxMperS.toFixed(0)} m/s ({CIRAD_BENCHMARKS.optimalAirVelocityMperS.toFixed(0)} m/s tested benchmark)
                 </p>
               </div>
 
@@ -931,7 +931,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                         CIRAD Energy-Efficient Model (Arnaud Chapuis 2015)
                       </span>
                       <span className="text-[11px] text-slate-500 block">
-                        Optimized air-to-solid ratio (9:1 to 11:1), minimum pipe length L ≥ 20m, 1D momentum transfer model.
+                        Optimized air-to-solid ratio ({CIRAD_BENCHMARKS.airToStarchRatioMin.toFixed(0)}:1 to {CIRAD_BENCHMARKS.airToStarchRatioMax.toFixed(0)}:1), minimum pipe length L ≥ {CIRAD_BENCHMARKS.minDevelopedPipeLengthM.toFixed(0)}m, 1D momentum transfer model.
                       </span>
                     </div>
                   </label>
