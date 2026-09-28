@@ -997,7 +997,10 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   const requestedLengthM = inputs.customTotalPipeLengthM;
   const hasCustomLength = requestedLengthM !== undefined && requestedLengthM !== null
     && Number.isFinite(Number(requestedLengthM)) && Number(requestedLengthM) > 0;
-  const totalPipeLengthM = hasCustomLength
+  // The TARGET length. This is what the design aims for; it is not yet the
+  // authoritative length. The segments below are built to reach it, and their
+  // sum then becomes the authoritative figure. See totalPipeLengthM below.
+  const targetPipeLengthM = hasCustomLength
     ? Math.round(Number(requestedLengthM) * 10) / 10
     : Math.max(MIN_PIPE_LENGTH_M, Math.round(calculatedLengthFromResidence * 10) / 10);
 
@@ -1005,11 +1008,272 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   const maxAllowedColumnH = inputs.ceilingClearanceM
     ? Math.max(4.0, Math.min(inputs.ceilingClearanceM - 1.2, 12.0))
     : 8.0;
-  const verticalColumnHeightM = Math.min(maxAllowedColumnH, Math.max(4.5, Math.round((totalPipeLengthM * 0.35) * 10) / 10));
-  const horizontalRunsLengthM = Math.max(0, Math.round((totalPipeLengthM - verticalColumnHeightM) * 10) / 10);
+  const verticalColumnHeightM = Math.min(maxAllowedColumnH, Math.max(4.5, Math.round((targetPipeLengthM * 0.35) * 10) / 10));
 
-  const estimatedResidenceTimeSec = Math.max(0.5, Math.round((totalPipeLengthM / us_vert) * 100) / 100);
-  const verticalResidenceTimeSec = Math.max(0.2, Math.round((verticalColumnHeightM / us_vert) * 100) / 100);
+  // =========================================================================
+  // FLASH TUBE ROUTING SEGMENTS — BUILT FIRST, AND AUTHORITATIVE
+  // =========================================================================
+  // ITEM 12. The developed length was previously computed twice, by two
+  // independent paths, and they disagreed.
+  //
+  //   Path A (early):  totalPipeLengthM, from the residence-time rule and the
+  //                    CIRAD floor. Used by the residence time, the length
+  //                    checks, the connectivity check and dimensions.
+  //   Path B (late):   the segment list, built to REACH path A's figure, then
+  //                    summed, then combined as
+  //                        totalPipeLengthM = max(A, sum_of_segments)
+  //
+  // Because the segment list is built to reach the target, the sum can only ever
+  // EXCEED it — the layouts add fixed fittings (venturi spool, elbows, U-bends,
+  // transition) on top of the straight runs, and the straight runs are computed
+  // as target minus fittings. Any rounding, or any fitting the straight-run
+  // subtraction did not anticipate, pushes the sum above the target. The max()
+  // then adopted the larger sum for the report alone.
+  //
+  // The observed symptom: double_loop reported 21.2 m in the fabrication report
+  // while the residence time, the CIRAD compliance test and the length checks all
+  // used 20.0 m. Two different lengths for one machine, in one document.
+  //
+  // FIX: the segments are the single source of truth. They are built first, their
+  // sum IS the developed length, and every consumer — residence time, the length
+  // checks, ciradCompliant, the fabrication report, the connectivity check and
+  // the dimensions block — reads that one value. Nothing recomputes it.
+  //
+  // The layouts below size their straight runs so the segment sum lands on the
+  // target where the geometry allows it, and the resulting sum is then reported
+  // honestly even where rounding moves it slightly.
+  // =========================================================================
+  const routingLayout = inputs.tubeRoutingLayout || 'single_loop';
+  // Venturi throat diameter (accelerates air to disperse wet cake). Declared here
+  // because the routing segments below name it in their descriptions, and it
+  // depends only on the tube diameter which is already resolved.
+  const venturiThroatDiameterMm = Math.max(25, Math.round(tubeDiameterStandardMm * 0.75));
+  const bendRadiusRatio = clampNum(inputs.bendRadiusRatio, 1.0, 6.0, 2.0);
+  // ITEM 13: wall thickness is bounded above by 5% of the outside diameter as
+  // well as by an absolute range. Both are needed. A bare 1.0-6.0 mm clamp is not
+  // sufficient on a small tube: 6 mm on a 48.3 mm OD is 12.4% of the diameter,
+  // which leaves a thin bore and is not a schedulable wall. The wall was previously
+  // taken raw from the input, so 300 mm gave a NEGATIVE inner diameter and a
+  // negative steel mass, and -2 mm gave a negative volume.
+  const maxWallThicknessMm = Math.max(1.0, Math.min(6.0, tubeDiameterStandardMm * 0.05));
+  const tubeWallThicknessMm = clampNum(inputs.tubeWallThicknessMm, 1.0, maxWallThicknessMm, 2.0);
+  const bendRadiusM = (bendRadiusRatio * tubeDiameterStandardMm) / 1000;
+  const D_m = (tubeDiameterStandardMm - tubeWallThicknessMm) / 1000;
+  const D_o_m = tubeDiameterStandardMm / 1000;
+  const D_i_m = (tubeDiameterStandardMm - 2 * tubeWallThicknessMm) / 1000;
+
+  const segments: FlashTubeSegment[] = [];
+  const elbowArcLengthM = (Math.PI / 2) * bendRadiusM;
+  const ubendArcLengthM = Math.PI * bendRadiusM;
+  const venturiSpoolLengthM = Math.max(1.0, Math.round((tubeDiameterStandardMm / 1000) * 1.8 * 10) / 10);
+  const transitionLengthM = 0.8;
+
+  let totalBends = 0;
+  // Downcomer length, taken from the segment actually built. The previous report
+  // published max(1.5, H - 2.5) for EVERY layout, which is unrelated to the
+  // segment: it reported 5.5 m for double_loop whose actual downcomer is a
+  // different value, and it published a downcomer for direct_vertical and other
+  // layouts that have no downcomer segment at all. This is set per layout below,
+  // from the segment, and is 0 where the layout has none.
+  let downcomerSegmentLengthM = 0;
+  // Straight-run lengths are solved so the SEGMENT SUM lands on the target
+  // length. Each layout subtracts its own fixed fittings from the target and
+  // gives the remainder to the leg that carries the adjustable length.
+  //
+  // The remainder is clamped at zero: if the fixed fittings alone exceed the
+  // target, the geometry simply is as long as it is. The sum is then reported
+  // as-is, because reporting a length the segments do not contain would be the
+  // exact defect this restructure exists to remove.
+  let riserM: number;
+  let downcomerM: number;
+  let adjustableRunM: number;
+  let adjustableRunSegmentId: string;
+  let adjustableRunName: string;
+  let adjustableRunDescription: string;
+
+  if (routingLayout === 'single_loop') {
+    totalBends = 3;
+    downcomerM = Math.max(1.5, Math.round((verticalColumnHeightM - 2.5) * 10) / 10);
+    const fixedSegmentsLength = venturiSpoolLengthM + elbowArcLengthM + verticalColumnHeightM + ubendArcLengthM + downcomerM + transitionLengthM;
+    adjustableRunM = Math.max(0, Math.round((targetPipeLengthM - fixedSegmentsLength) * 10) / 10);
+    riserM = verticalColumnHeightM;
+    adjustableRunSegmentId = 'seg-loop-straight';
+    adjustableRunName = 'Horizontal Intermediate Loop Extension Run';
+    adjustableRunDescription = 'Straight horizontal/inclined spool providing additional developed length for complete residence time.';
+  } else if (routingLayout === 'double_loop') {
+    totalBends = 5;
+    riserM = Math.min(verticalColumnHeightM, 6.0);
+    downcomerM = Math.min(verticalColumnHeightM, 5.5);
+    const fixedForDoubleLoop = venturiSpoolLengthM + elbowArcLengthM + riserM + 2 * ubendArcLengthM + downcomerM + transitionLengthM;
+    adjustableRunM = Math.max(0, Math.round((targetPipeLengthM - fixedForDoubleLoop) * 10) / 10);
+    adjustableRunSegmentId = 'seg-intermediate-runs';
+    adjustableRunName = 'Serpentine Return Loop Runs (Double Pass)';
+    adjustableRunDescription = 'Intermediate vertical and horizontal cross-over pipes.';
+  } else {
+    // direct_vertical and any other layout: a single straight riser carries the
+    // adjustable length, and there is NO downcomer segment.
+    totalBends = 2;
+    riserM = Math.max(5.0, Math.round((targetPipeLengthM - (venturiSpoolLengthM + 2 * elbowArcLengthM + transitionLengthM)) * 10) / 10);
+    downcomerM = 0;
+    adjustableRunM = 0;
+    adjustableRunSegmentId = '';
+    adjustableRunName = '';
+    adjustableRunDescription = '';
+  }
+
+  // Downcomer, as actually built. Zero where the layout has no downcomer.
+  downcomerSegmentLengthM = downcomerM;
+  segments.push({
+    id: 'seg-venturi',
+    name: 'Venturi Feed Disperser & Acceleration Spool',
+    type: 'transition',
+    quantity: 1,
+    unitLengthM: venturiSpoolLengthM,
+    totalLengthM: venturiSpoolLengthM,
+    description: `Converging nozzle (Ø${tubeDiameterStandardMm}mm → Ø${venturiThroatDiameterMm}mm) with wet cake injection collar and divergence cone.`,
+    weldsCount: 2,
+  });
+  segments.push({
+    id: 'seg-elbow-base',
+    name: 'Base 90° Long-Radius Sweep Elbow',
+    type: 'elbow_90',
+    quantity: 1,
+    unitLengthM: Math.round(elbowArcLengthM * 100) / 100,
+    totalLengthM: Math.round(elbowArcLengthM * 100) / 100,
+    description: `Smooth centerline bend (R = ${bendRadiusRatio}D = ${(bendRadiusM * 1000).toFixed(0)} mm) turning air vertically upward into the riser.`,
+    weldsCount: 2,
+  });
+  segments.push({
+    id: 'seg-riser',
+    name: routingLayout === 'double_loop' ? 'Vertical Primary Column Riser' : routingLayout === 'straight_riser' ? 'Direct Vertical Column Riser (Full Height)' : 'Vertical Drying Column Riser Spool',
+    type: 'straight',
+    quantity: 1,
+    unitLengthM: riserM,
+    totalLengthM: riserM,
+    description: routingLayout === 'double_loop'
+      ? 'Primary vertical riser column.'
+      : routingLayout === 'straight_riser'
+        ? 'Continuous vertical column rising directly to cyclone elevation.'
+        : 'Vertical primary conveying column where convective heat transfer vaporizes surface moisture.',
+    weldsCount: Math.ceil(riserM / 1.5) + 1,
+  });
+
+  if (routingLayout === 'single_loop' || routingLayout === 'double_loop') {
+    segments.push({
+      id: routingLayout === 'single_loop' ? 'seg-ubend-top' : 'seg-ubend-1',
+      name: routingLayout === 'single_loop' ? 'Top 180° Return U-Bend Assembly' : 'Upper 180° Return Bend #1',
+      type: 'ubend_180',
+      quantity: 1,
+      unitLengthM: Math.round(ubendArcLengthM * 100) / 100,
+      totalLengthM: Math.round(ubendArcLengthM * 100) / 100,
+      description: routingLayout === 'single_loop'
+        ? `180° sweep turnaround (R = ${bendRadiusRatio}D) directing drying suspension toward cyclone downcomer.`
+        : 'First 180° return U-bend.',
+      weldsCount: 4,
+    });
+
+    if (adjustableRunM > 0.1) {
+      segments.push({
+        id: adjustableRunSegmentId,
+        name: adjustableRunName,
+        type: 'straight',
+        quantity: 1,
+        unitLengthM: adjustableRunM,
+        totalLengthM: adjustableRunM,
+        description: adjustableRunDescription,
+        weldsCount: Math.ceil(adjustableRunM / 1.5) + (routingLayout === 'double_loop' ? 2 : 1),
+      });
+    }
+
+    if (routingLayout === 'double_loop') {
+      segments.push({
+        id: 'seg-ubend-2',
+        name: 'Lower 180° Return Bend #2',
+        type: 'ubend_180',
+        quantity: 1,
+        unitLengthM: Math.round(ubendArcLengthM * 100) / 100,
+        totalLengthM: Math.round(ubendArcLengthM * 100) / 100,
+        description: 'Second 180° turnaround routing toward cyclone downcomer.',
+        weldsCount: 4,
+      });
+    }
+  }
+
+  if (downcomerM > 0) {
+    segments.push({
+      id: 'seg-downcomer',
+      name: routingLayout === 'single_loop' ? 'Downcomer Drop Pipe to Cyclone' : 'Final Downcomer Pipe to Cyclone',
+      type: 'straight',
+      quantity: 1,
+      unitLengthM: downcomerM,
+      totalLengthM: downcomerM,
+      description: 'Downward conveying run routing suspension to cyclone separator inlet height.',
+      weldsCount: Math.ceil(downcomerM / 1.5) + 1,
+    });
+  }
+
+  if (routingLayout !== 'single_loop' && routingLayout !== 'double_loop') {
+    segments.push({
+      id: 'seg-elbow-top',
+      name: 'Top 90° Sweep Elbow into Cyclone',
+      type: 'elbow_90',
+      quantity: 1,
+      unitLengthM: Math.round(elbowArcLengthM * 100) / 100,
+      totalLengthM: Math.round(elbowArcLengthM * 100) / 100,
+      description: 'Top turn entering cyclone scroll horizontally.',
+      weldsCount: 2,
+    });
+  }
+
+  segments.push({
+    id: 'seg-cyclone-trans',
+    name: 'Cyclone Tangential Inlet Transition Spool',
+    type: 'transition',
+    quantity: 1,
+    unitLengthM: transitionLengthM,
+    totalLengthM: transitionLengthM,
+    description: `Round-to-rectangular transition fitting entering the cyclone tangential scroll (Ø${tubeDiameterStandardMm}mm round to rectangular inlet).`,
+    weldsCount: 2,
+  });
+
+  // =========================================================================
+  // THE AUTHORITATIVE DEVELOPED LENGTH
+  // =========================================================================
+  // One number. Computed once, as the sum of the segments that were actually
+  // built, and read by every consumer from here on: the residence time, the
+  // length checks, ciradCompliant, the fabrication report, the connectivity
+  // check and the dimensions block.
+  const totalPipeLengthM = Math.round(segments.reduce((acc, s) => acc + s.totalLengthM, 0) * 10) / 10;
+
+  // Horizontal run length, also derived from the segments rather than assumed as
+  // "everything that is not the riser". Straight legs that are neither the riser
+  // nor the downcomer.
+  const riserSegmentLengthM = riserM;
+  const horizontalRunsLengthM = Math.max(
+    0,
+    Math.round((totalPipeLengthM - riserSegmentLengthM - downcomerSegmentLengthM) * 10) / 10,
+  );
+
+  // ITEM 14: residence time evaluated PER LEG, not L/(v - v_t) for the whole
+  // tube. The single-speed form applied the riser condition — the slowest leg —
+  // to the horizontal and downcomer runs as well, overstating the time spent
+  // there and, because that time fed the length sizing, compounding the error.
+  //
+  //   riser (upward)     particle velocity = v - v_t   (gravity opposes)
+  //   horizontal          particle velocity = v x slip (gravity neutral)
+  //   downcomer (down)   particle velocity = v + v_t   (gravity assists)
+  //
+  // The horizontal slip factor is 0.85, disclosed in assumedParameters: a
+  // particle in a horizontal duct rides the lower part of the profile and is
+  // retarded by the wall, so it travels slightly slower than the gas.
+  const riserResidenceSec = riserSegmentLengthM / Math.max(0.1, us_vert);
+  const horizontalResidenceSec = horizontalRunsLengthM / Math.max(0.1, us_horiz);
+  const downcomerResidenceSec = downcomerSegmentLengthM / Math.max(0.1, us_down);
+  const estimatedResidenceTimeSec = Math.max(
+    0.1,
+    Math.round((riserResidenceSec + horizontalResidenceSec + downcomerResidenceSec) * 100) / 100,
+  );
+  const verticalResidenceTimeSec = Math.max(0.05, Math.round(riserResidenceSec * 100) / 100);
 
   addStep(
     'Dryer Dimensions',
@@ -1032,8 +1296,6 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Governed by tau >= 1.5s and CIRAD L >= 20m threshold. Slight ±0.3m variations between throughputs occur because standard commercial pipe diameters are discrete/quantized.'
   );
 
-  // Venturi throat diameter (accelerates air to disperse wet cake)
-  const venturiThroatDiameterMm = Math.max(25, Math.round(tubeDiameterStandardMm * 0.75));
   const venturiThroatAreaM2 = (Math.PI * Math.pow(venturiThroatDiameterMm / 1000, 2)) / 4;
   const venturiThroatVelocityMperS = averageVolumetricFlowM3S / venturiThroatAreaM2;
 
@@ -1389,60 +1651,82 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   const screwPitchMm = clampNum(inputs.screwPitchMm, 5, 500, Math.min(500, screwDiamMm)); // standard pitch = diameter
   // Screw capacity is DERIVED from the screw's own geometry rather than typed in.
   //
-  // The previous design took capacity as an independent user input (0.41 ft³/h/rpm
+  // The original design took capacity as an independent user input (0.41 ft³/h/rpm
   // for the reference 4" screw at 30% loading) while ALSO taking diameter, pitch
   // and loading as separate inputs. Nothing tied them together, so a user could
   // specify a 200 mm screw and still be given a speed rating computed from the
   // 4" capacity — the two sets of inputs silently contradicting each other, with
   // no check to catch it.
   //
-  // The CEMA geometric relation for a screw conveyor, in the volumetric form
+  // CAPACITY MODEL: the volume SWEPT by the helical flight in one revolution.
   //
-  //     Q = 0.00284 * C * N * D^2 * F     [ft³/h]
+  //     V_rev = pitch * pi/4 * (D_outer^2 - D_shaft^2)     [m3/rev, 100% fill]
+  //     Q     = V_rev * filling_rate * RPM / 60             [m3/s]
   //
-  // with D in inches, N in revolutions PER HOUR, F the trough loading factor as a
-  // fraction, and C the CEMA configuration constant for a full-pitch screw in a
-  // standard trough. Per revolution this reduces to a capacity scaling with the
-  // SQUARE of the diameter, because the swept trough cross-section, not the flight
-  // tip speed, is what limits throughput.
-  //
-  // Converting to capacity PER REVOLUTION PER MINUTE (the unit the RPM sizing
-  // below needs) folds in the 60 rev/h per rev/min:
-  //
-  //     C_rpm = 0.00284 * 60 * C * D^2 * F
-  //
-  // with C = 0.5174 for a full-pitch screw in a standard trough, giving a combined
-  // constant of 0.08817. Checked against the published reference: a 4-inch
-  // (100 mm) screw at 30% trough loading and full pitch gives
+  // Both terms matter. The annulus (D_outer^2 - D_shaft^2) is the product the
+  // flight can actually push, since the shaft displaces the trough; and the pitch
+  // is the axial distance advanced per revolution, so a longer pitch moves more
+  // product per turn.
   //
   //     0.08817 * 3.937^2 * 0.30 = 0.410 ft³/h/rpm
   //
-  // which reproduces the 0.41 ft³/h/rpm quoted in Kuye et al. (2011). The
-  // reference value was therefore the geometric capacity of that screw all along,
-  // not a free parameter — deriving it keeps it correct as the geometry changes.
+  // The CEMA table form was previously used here, with its constant OBTAINED BY
+  // solving backwards to reproduce the 0.41 ft³/h/rpm quoted in Kuye et al. (2011).
+  // Forcing a formula to hit a target and then treating the match as validation
+  // proves nothing — it only guarantees the formula returns what it was tuned to.
+  //
+  // Checked against an INDEPENDENT implementation, ScrewFeederDesignTool_V1.0.xlsx
+  // (sheet ScrewFeederDesign, cell C8), the CEMA form overstates capacity by about
+  // 20% for the same geometry (0.3838 vs 0.3195 ft3/h/rpm at D = 80 mm, 20 mm
+  // shaft, 40% fill). An earlier note here claimed a 29x error; that was wrong,
+  // and came from comparing a ft3/h/rpm figure against a m3/rev figure.
+  // That workbook's C8 carries the actual formula:
+  //
+  //     V_rev = pitch * pi/4 * (D_outer^2 - D_shaft^2)
+  //
+  // which is the volume SWEPT by the helical flight in one revolution — the
+  // annular cross-section between shaft and casing, advanced by one pitch. The
+  // filling rate is applied separately when the flow is computed:
+  //
+  //     Q = V_rev * filling_rate * RPM / 60        [m3/s]
+  //
+  // Reproducing that tool's inputs (D = 80 mm, shaft = 20 mm, pitch = 80 mm):
+  //
+  //     V_rev = 0.08 * pi/4 * (0.08^2 - 0.02^2) = 3.769911e-4 m3/rev
+  //
+  // which matches the workbook's C8 = 0.0003769911184307752 exactly, and at
+  // 36 rev/min, 40% fill and 380 kg/m3 yields 123.77 kg/h, matching its G23.
+  //
+  // The swept-volume form is used rather than the CEMA table because it is the one
+  // the reference tooling actually implements, it is exact rather than fitted, and
+  // it retains the geometry terms the CEMA form collapses into a single constant.
+  // The shaft annulus in particular: a heavier shaft transports materially less,
+  // which CEMA captures only weakly.
+  //
+  // This is a GEOMETRIC upper bound. It assumes the flight sweeps a clean cylinder
+  // with no slip, no flight thickness and no bridged void, so a real screw delivers
+  // somewhat less. It is the right basis for a design estimate, and it is what the
+  // reference tool uses.
   const pitchRatio = screwPitchMm / screwDiamMm; // 1.0 = full pitch, 0.5 = half pitch
-  // CEMA loading factor for a standard trough, as a fraction of cross-section.
-  // Below 30% the relationship is linear; above it, capacity rises more slowly as
-  // the trough fills toward spillover.
-  const troughLoadingFactor =
-    screwTroughLoadingPercent <= 30
-      ? screwTroughLoadingPercent / 100
-      : Math.min(0.9, 0.3 + 0.8 * Math.pow((screwTroughLoadingPercent - 30) / 70, 0.9));
-  // Configuration constant. C = 0.5174 is the CEMA value for a full-pitch screw in
-  // a standard trough; half pitch lifts throughput by about 25% per CEMA practice,
-  // and a slimmer shaft frees more trough area.
-  const pitchConfigurationConstant = pitchRatio <= 0.5 ? 1.25 : 1.0;
-  const shaftProportion = screwShaftDiameterMm / Math.max(1, screwDiamMm);
-  const shaftConfigurationConstant = 1 + 0.5 * Math.max(0, 0.25 - shaftProportion);
-  const SCREW_CAPACITY_CONSTANT = 0.00284 * 60 * 0.5174; // full-pitch, standard trough
+  // Annulus between shaft and casing. The shaft displaces product, so it must be
+  // subtracted: (D_o^2 - D_s^2)/4 is the swept annulus area.
+  const screwAnnulusAreaM2 =
+    (Math.PI / 4) * (Math.pow(screwDiamMm / 1000, 2) - Math.pow(screwShaftDiameterMm / 1000, 2));
+  // Volume swept per revolution at 100% trough fill, m3/rev.
+  const screwSweptVolumeM3PerRev = (screwPitchMm / 1000) * screwAnnulusAreaM2;
+  // Capacity at the selected filling rate, m3 per revolution. Reported in ft3/h/rpm
+  // for continuity with the rest of the design report.
+  const screwSweptVolumeM3PerRevAtFill = screwSweptVolumeM3PerRev * (screwTroughLoadingPercent / 100);
   const screwCapacityFactorPerRpm = Math.max(
-    1e-3,
-    SCREW_CAPACITY_CONSTANT *
-      pitchConfigurationConstant *
-      shaftConfigurationConstant *
-      Math.pow(screwDiamInches, 2) *
-      troughLoadingFactor,
+    1e-6,
+    screwSweptVolumeM3PerRevAtFill * 60 * 35.3146667,
   );
+  // Trough loading factor retained only for the assumptions ledger and the
+  // trace, so the report can state the fill used. It is no longer a capacity
+  // multiplier beyond the linear term already applied above.
+  const troughLoadingFactor = screwTroughLoadingPercent / 100;
+  const pitchConfigurationConstant = pitchRatio;
+  const shaftConfigurationConstant = screwShaftDiameterMm / Math.max(1, screwDiamMm);
   const screwSelectedRpm = clampNum(inputs.screwSelectedRpm, 1, 1200, 55); // 55 RPM reference design
   const screwMaterialFactor = clampNum(inputs.screwMaterialFactor, 1, 3, 1.2);
   const screwFlightFactor = clampNum(inputs.screwFlightFactor, 0.5, 2, 1.0);
@@ -1598,20 +1882,22 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     '7. Screw Capacity per RPM',
     'C_rpm',
     'ft³/h/RPM',
-    'Volumetric delivery of the specified screw per revolution, derived from its own geometry. Capacity scales with the square of the screw diameter because the swept trough cross-section, not the flight tip speed, is what limits throughput. Change the diameter, pitch or loading and this figure follows automatically.',
-    'C_rpm = 0.08817 × C_pitch × C_shaft × D_in² × F_loading',
+    'Volumetric delivery of the specified screw per revolution, derived from the volume swept by the helical flight. The annulus between shaft and casing is the product the flight can push, and the pitch is the axial distance advanced per revolution, so both terms respond to the geometry. Change the diameter, pitch, shaft or loading and this figure follows automatically.',
+    'V_rev = pitch × (π/4) × (D_o² − D_shaft²)   →   C_rpm = V_rev × F_loading × 60',
     [
-      { symbol: 'D_in', name: 'Screw outside diameter', value: screwDiamInches.toFixed(2), unit: 'in', classification: 'User Input' },
-      { symbol: 'F_loading', name: 'CEMA trough loading factor', value: troughLoadingFactor.toFixed(3), unit: '-', classification: 'Calculated' },
-      { symbol: 'C_pitch', name: 'Pitch configuration constant', value: pitchConfigurationConstant.toFixed(2), unit: '-', classification: 'Calculated' },
-      { symbol: 'C_shaft', name: 'Shaft configuration constant', value: shaftConfigurationConstant.toFixed(2), unit: '-', classification: 'Calculated' }
+      { symbol: 'D_o', name: 'Screw outside diameter', value: (screwDiamMm / 1000).toFixed(4), unit: 'm', classification: 'User Input' },
+      { symbol: 'D_shaft', name: 'Shaft diameter', value: (screwShaftDiameterMm / 1000).toFixed(4), unit: 'm', classification: 'User Input' },
+      { symbol: 'A_annulus', name: 'Swept annulus area (π/4)(D_o² − D_s²)', value: screwAnnulusAreaM2.toExponential(4), unit: 'm²', classification: 'Calculated' },
+      { symbol: 'p', name: 'Flight pitch (axial advance per revolution)', value: (screwPitchMm / 1000).toFixed(4), unit: 'm', classification: 'User Input' },
+      { symbol: 'V_rev', name: 'Swept volume per revolution at 100% fill', value: screwSweptVolumeM3PerRev.toExponential(4), unit: 'm³/rev', classification: 'Calculated' },
+      { symbol: 'F_loading', name: 'Trough filling rate', value: troughLoadingFactor.toFixed(2), unit: '-', classification: 'User Input' }
     ],
-    `0.08817 × ${pitchConfigurationConstant.toFixed(2)} × ${shaftConfigurationConstant.toFixed(2)} × ${screwDiamInches.toFixed(2)}² × ${troughLoadingFactor.toFixed(3)}`,
+    `${(screwPitchMm / 1000).toFixed(4)} × (${screwAnnulusAreaM2.toExponential(4)}) = ${screwSweptVolumeM3PerRev.toExponential(4)} m³/rev, × ${troughLoadingFactor.toFixed(2)} fill = ${screwSweptVolumeM3PerRevAtFill.toExponential(4)} m³/rev`,
     screwCapacityFactorPerRpm,
-    `${screwCapacityFactorPerRpm.toFixed(3)} ft³/h per RPM`,
-    'CEMA Belt Conveyor Idlers / Screw Conveyor Design; Kuye et al. (2011), p. 16',
+    `${screwCapacityFactorPerRpm.toFixed(4)} ft³/h per RPM (${screwSweptVolumeM3PerRevAtFill.toExponential(4)} m³/rev)`,
+    'ScrewFeederDesignTool_V1.0.xlsx, sheet ScrewFeederDesign, cell C8 (client reference implementation)',
     'Calculated',
-    `Derived from the ${screwDiamMm} mm screw at ${screwTroughLoadingPercent.toFixed(0)}% trough loading and ${pitchRatio.toFixed(2)} pitch ratio. The 0.08817 constant is 0.00284 per rev/h, converted to per rev/min, times the CEMA full-pitch configuration constant of 0.5174. A 4-inch screw at 30% loading returns 0.410 ft³/h/rpm here, matching the 0.41 ft³/h/rpm quoted in Kuye et al. (2011).`
+    `Swept-volume model, verified against the client reference workbook: an 80 mm screw with a 20 mm shaft on 80 mm pitch gives ${screwSweptVolumeM3PerRev.toExponential(4)} m³/rev against the workbook's 0.0003769911184307752 — an exact match. This replaces a CEMA table form whose constant had been fitted to reproduce a single published number and which overstated capacity by about 20% for the same geometry. This is a geometric upper bound and assumes no slip or flight thickness.`
   );
 
   addStep(
@@ -3485,269 +3771,34 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     });
   }
 
-  // -------------------------------------------------------------
-  // FLASH TUBE DEVELOPED LENGTH & FABRICATION REPORT
-  // -------------------------------------------------------------
-  const routingLayout = inputs.tubeRoutingLayout || 'single_loop';
-  const bendRadiusRatio = inputs.bendRadiusRatio || 2.0;
-  const tubeWallThicknessMm = inputs.tubeWallThicknessMm || 2.0;
-  const bendRadiusM = (bendRadiusRatio * tubeDiameterStandardMm) / 1000;
-  const D_m = (tubeDiameterStandardMm - tubeWallThicknessMm) / 1000;
-  const D_o_m = tubeDiameterStandardMm / 1000;
-  const D_i_m = (tubeDiameterStandardMm - 2 * tubeWallThicknessMm) / 1000;
-
-  const segments: FlashTubeSegment[] = [];
-  const elbowArcLengthM = (Math.PI / 2) * bendRadiusM;
-  const ubendArcLengthM = Math.PI * bendRadiusM;
-  const venturiSpoolLengthM = Math.max(1.0, Math.round((tubeDiameterStandardMm / 1000) * 1.8 * 10) / 10);
-  const transitionLengthM = 0.8;
-
-  let totalBends = 0;
-
-  if (routingLayout === 'single_loop') {
-    totalBends = 3;
-    const downcomerM = Math.max(1.5, Math.round((verticalColumnHeightM - 2.5) * 10) / 10);
-    const fixedSegmentsLength = venturiSpoolLengthM + elbowArcLengthM + verticalColumnHeightM + ubendArcLengthM + downcomerM + transitionLengthM;
-    const additionalStraightM = Math.max(0, Math.round((totalPipeLengthM - fixedSegmentsLength) * 10) / 10);
-
-    segments.push({
-      id: 'seg-venturi',
-      name: 'Venturi Feed Disperser & Acceleration Spool',
-      type: 'transition',
-      quantity: 1,
-      unitLengthM: venturiSpoolLengthM,
-      totalLengthM: venturiSpoolLengthM,
-      description: `Converging nozzle (Ø${tubeDiameterStandardMm}mm → Ø${venturiThroatDiameterMm}mm) with wet cake injection collar and divergence cone.`,
-      weldsCount: 2,
-    });
-    segments.push({
-      id: 'seg-elbow-base',
-      name: 'Base 90° Long-Radius Sweep Elbow',
-      type: 'elbow_90',
-      quantity: 1,
-      unitLengthM: Math.round(elbowArcLengthM * 100) / 100,
-      totalLengthM: Math.round(elbowArcLengthM * 100) / 100,
-      description: `Smooth centerline bend (R = ${bendRadiusRatio}D = ${(bendRadiusM * 1000).toFixed(0)} mm) turning air vertically upward into the riser.`,
-      weldsCount: 2,
-    });
-    segments.push({
-      id: 'seg-riser',
-      name: 'Vertical Drying Column Riser Spool',
-      type: 'straight',
-      quantity: 1,
-      unitLengthM: verticalColumnHeightM,
-      totalLengthM: verticalColumnHeightM,
-      description: `Vertical primary conveying column where convective heat transfer vaporizes surface moisture.`,
-      weldsCount: Math.ceil(verticalColumnHeightM / 1.5) + 1,
-    });
-    segments.push({
-      id: 'seg-ubend-top',
-      name: 'Top 180° Return U-Bend Assembly',
-      type: 'ubend_180',
-      quantity: 1,
-      unitLengthM: Math.round(ubendArcLengthM * 100) / 100,
-      totalLengthM: Math.round(ubendArcLengthM * 100) / 100,
-      description: `180° sweep turnaround (R = ${bendRadiusRatio}D) directing drying suspension toward cyclone downcomer.`,
-      weldsCount: 4,
-    });
-    if (additionalStraightM > 0.1) {
-      segments.push({
-        id: 'seg-loop-straight',
-        name: 'Horizontal Intermediate Loop Extension Run',
-        type: 'straight',
-        quantity: 1,
-        unitLengthM: additionalStraightM,
-        totalLengthM: additionalStraightM,
-        description: `Straight horizontal/inclined spool providing additional developed length for complete residence time.`,
-        weldsCount: Math.ceil(additionalStraightM / 1.5) + 1,
-      });
-    }
-    segments.push({
-      id: 'seg-downcomer',
-      name: 'Downcomer Drop Pipe to Cyclone',
-      type: 'straight',
-      quantity: 1,
-      unitLengthM: downcomerM,
-      totalLengthM: downcomerM,
-      description: `Downward conveying run routing suspension to cyclone separator inlet height.`,
-      weldsCount: Math.ceil(downcomerM / 1.5) + 1,
-    });
-    segments.push({
-      id: 'seg-cyclone-trans',
-      name: 'Cyclone Tangential Inlet Transition Spool',
-      type: 'transition',
-      quantity: 1,
-      unitLengthM: transitionLengthM,
-      totalLengthM: transitionLengthM,
-      description: `Round-to-rectangular transition fitting entering cyclone tangential scroll (Ø${tubeDiameterStandardMm}mm → ${cycloneInletHeightMm}×${cycloneInletWidthMm}mm).`,
-      weldsCount: 2,
-    });
-  } else if (routingLayout === 'double_loop') {
-    totalBends = 5;
-    const riserM = Math.min(verticalColumnHeightM, 6.0);
-    const downcomerM = Math.min(verticalColumnHeightM, 5.5);
-    const loopRunsM = Math.max(0, Math.round((totalPipeLengthM - (venturiSpoolLengthM + elbowArcLengthM + riserM + 2 * ubendArcLengthM + downcomerM + transitionLengthM)) * 10) / 10);
-
-    segments.push({
-      id: 'seg-venturi',
-      name: 'Venturi Feed Disperser & Acceleration Spool',
-      type: 'transition',
-      quantity: 1,
-      unitLengthM: venturiSpoolLengthM,
-      totalLengthM: venturiSpoolLengthM,
-      description: `Converging nozzle with wet cake injection collar.`,
-      weldsCount: 2,
-    });
-    segments.push({
-      id: 'seg-elbow-base',
-      name: 'Base 90° Long-Radius Sweep Elbow',
-      type: 'elbow_90',
-      quantity: 1,
-      unitLengthM: Math.round(elbowArcLengthM * 100) / 100,
-      totalLengthM: Math.round(elbowArcLengthM * 100) / 100,
-      description: `90° smooth elbow (R = ${bendRadiusRatio}D).`,
-      weldsCount: 2,
-    });
-    segments.push({
-      id: 'seg-riser',
-      name: 'Vertical Primary Column Riser',
-      type: 'straight',
-      quantity: 1,
-      unitLengthM: riserM,
-      totalLengthM: riserM,
-      description: `Primary vertical riser column.`,
-      weldsCount: Math.ceil(riserM / 1.5) + 1,
-    });
-    segments.push({
-      id: 'seg-ubend-1',
-      name: 'Upper 180° Return Bend #1',
-      type: 'ubend_180',
-      quantity: 1,
-      unitLengthM: Math.round(ubendArcLengthM * 100) / 100,
-      totalLengthM: Math.round(ubendArcLengthM * 100) / 100,
-      description: `First 180° return U-bend.`,
-      weldsCount: 4,
-    });
-    segments.push({
-      id: 'seg-intermediate-runs',
-      name: 'Serpentine Return Loop Runs (Double Pass)',
-      type: 'straight',
-      quantity: 1,
-      unitLengthM: loopRunsM,
-      totalLengthM: loopRunsM,
-      description: `Intermediate vertical and horizontal cross-over pipes.`,
-      weldsCount: Math.ceil(loopRunsM / 1.5) + 2,
-    });
-    segments.push({
-      id: 'seg-ubend-2',
-      name: 'Lower 180° Return Bend #2',
-      type: 'ubend_180',
-      quantity: 1,
-      unitLengthM: Math.round(ubendArcLengthM * 100) / 100,
-      totalLengthM: Math.round(ubendArcLengthM * 100) / 100,
-      description: `Second 180° turnaround routing toward cyclone downcomer.`,
-      weldsCount: 4,
-    });
-    segments.push({
-      id: 'seg-downcomer',
-      name: 'Final Downcomer Pipe to Cyclone',
-      type: 'straight',
-      quantity: 1,
-      unitLengthM: downcomerM,
-      totalLengthM: downcomerM,
-      description: `Downward delivery leg.`,
-      weldsCount: Math.ceil(downcomerM / 1.5) + 1,
-    });
-    segments.push({
-      id: 'seg-cyclone-trans',
-      name: 'Cyclone Tangential Inlet Transition Spool',
-      type: 'transition',
-      quantity: 1,
-      unitLengthM: transitionLengthM,
-      totalLengthM: transitionLengthM,
-      description: `Round-to-rectangular transition fitting.`,
-      weldsCount: 2,
-    });
-  } else {
-    totalBends = 2;
-    const riserM = Math.max(5.0, Math.round((totalPipeLengthM - (venturiSpoolLengthM + 2 * elbowArcLengthM + transitionLengthM)) * 10) / 10);
-    segments.push({
-      id: 'seg-venturi',
-      name: 'Venturi Feed Disperser & Acceleration Spool',
-      type: 'transition',
-      quantity: 1,
-      unitLengthM: venturiSpoolLengthM,
-      totalLengthM: venturiSpoolLengthM,
-      description: `Converging nozzle with wet cake injection collar.`,
-      weldsCount: 2,
-    });
-    segments.push({
-      id: 'seg-elbow-base',
-      name: 'Base 90° Long-Radius Sweep Elbow',
-      type: 'elbow_90',
-      quantity: 1,
-      unitLengthM: Math.round(elbowArcLengthM * 100) / 100,
-      totalLengthM: Math.round(elbowArcLengthM * 100) / 100,
-      description: `Base turning elbow into vertical column.`,
-      weldsCount: 2,
-    });
-    segments.push({
-      id: 'seg-riser',
-      name: 'Direct Vertical Column Riser (Full Height)',
-      type: 'straight',
-      quantity: 1,
-      unitLengthM: riserM,
-      totalLengthM: riserM,
-      description: `Continuous vertical column rising directly to cyclone elevation.`,
-      weldsCount: Math.ceil(riserM / 1.5) + 1,
-    });
-    segments.push({
-      id: 'seg-elbow-top',
-      name: 'Top 90° Sweep Elbow into Cyclone',
-      type: 'elbow_90',
-      quantity: 1,
-      unitLengthM: Math.round(elbowArcLengthM * 100) / 100,
-      totalLengthM: Math.round(elbowArcLengthM * 100) / 100,
-      description: `Top turn entering cyclone scroll horizontally.`,
-      weldsCount: 2,
-    });
-    segments.push({
-      id: 'seg-cyclone-trans',
-      name: 'Cyclone Tangential Inlet Transition Spool',
-      type: 'transition',
-      quantity: 1,
-      unitLengthM: transitionLengthM,
-      totalLengthM: transitionLengthM,
-      description: `Round-to-rectangular transition.`,
-      weldsCount: 2,
-    });
-  }
-
-  const calculatedSumDevelopedLengthM = Math.round(segments.reduce((acc, s) => acc + s.totalLengthM, 0) * 10) / 10;
-  const finalTotalLengthM = Math.max(totalPipeLengthM, calculatedSumDevelopedLengthM);
 
   const devCircumferenceMm = Math.round(Math.PI * (D_m * 1000));
-  const tubeSurfaceAreaM2 = Math.round(Math.PI * D_o_m * finalTotalLengthM * 100) / 100;
-  const metalVolumeM3 = Math.PI * D_m * (tubeWallThicknessMm / 1000) * finalTotalLengthM;
+  const tubeSurfaceAreaM2 = Math.round(Math.PI * D_o_m * totalPipeLengthM * 100) / 100;
+  const metalVolumeM3 = Math.PI * D_m * (tubeWallThicknessMm / 1000) * totalPipeLengthM;
   const estimatedMassKg = Math.round(metalVolumeM3 * 7930);
   const standardStrakeVendorWidthM = 1.2;
-  const standardStrakesCount = Math.ceil(finalTotalLengthM / standardStrakeVendorWidthM);
+  const standardStrakesCount = Math.ceil(totalPipeLengthM / standardStrakeVendorWidthM);
   const circWeldLengthM = Math.round((standardStrakesCount + segments.length) * Math.PI * D_o_m * 10) / 10;
-  const longWeldLengthM = Math.round(finalTotalLengthM * 10) / 10;
+  const longWeldLengthM = Math.round(totalPipeLengthM * 10) / 10;
   const totalWeldSeamLengthM = Math.round((circWeldLengthM + longWeldLengthM) * 10) / 10;
 
   const developedLengthReport: FlashTubeDevelopedLengthReport = {
-    totalDevelopedLengthM: finalTotalLengthM,
+    totalDevelopedLengthM: totalPipeLengthM,
     effectiveResidenceTimeSec: estimatedResidenceTimeSec,
     verticalColumnHeightM,
     horizontalRunsLengthM,
-    downcomerLengthM: Math.max(1.5, verticalColumnHeightM - 2.5),
+    // Taken from the segment that was actually built, not from a formula applied
+    // to the column height. The previous value, max(1.5, H - 2.5), was published
+    // for every layout regardless of what the segment list contained: it reported
+    // a downcomer for straight_riser, which has no downcomer segment at all, and
+    // a value that did not match the built segment for the layouts that do.
+    downcomerLengthM: downcomerSegmentLengthM,
     totalBendsCount: totalBends,
     bendRadiusM: Math.round(bendRadiusM * 1000) / 1000,
     bendRadiusRatio,
     routingLayout,
     segments,
-    ciradCompliant: finalTotalLengthM >= CIRAD_BENCHMARKS.minDevelopedPipeLengthM,
+    ciradCompliant: totalPipeLengthM >= CIRAD_BENCHMARKS.minDevelopedPipeLengthM,
     ciradThresholdM: CIRAD_BENCHMARKS.minDevelopedPipeLengthM,
     sheetMetal: {
       outerDiameterMm: tubeDiameterStandardMm,
@@ -3895,6 +3946,26 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       id: 'asm-hex-ft', category: 'Process Condition', parameterName: 'LMTD correction factor', symbol: 'F_t',
       value: correctionFactorFt.toFixed(2), unit: '-', basis: correctionFactorBasis,
       rationale: 'Cross-flow exchangers never reach the parallel-flow LMTD, so F < 1 always. Treating cross-flow as F = 1.0 understated the required surface area by roughly 11%.', isUserInput: false,
+    },
+    {
+      id: 'asm-horizontal-slip', category: 'Process Condition', parameterName: 'Horizontal-run particle slip factor', symbol: 'k_slip',
+      value: HORIZONTAL_SLIP_FACTOR.toFixed(2), unit: '-', basis: 'Particle travel speed as a fraction of gas speed in a horizontal duct',
+      rationale: 'A particle in a horizontal run rides the lower part of the velocity profile and is retarded by the duct wall, so it travels slightly slower than the gas. Used to compute the residence time of the horizontal legs, which the previous single-speed expression L/(v - v_t) mis-estimated by applying the riser condition — the slowest leg of the machine — to every metre of duct.', isUserInput: false,
+    },
+    {
+      id: 'asm-length-authority', category: 'Process Condition', parameterName: 'Developed length basis', symbol: 'L_dev',
+      value: totalPipeLengthM.toFixed(1), unit: 'm', basis: 'Sum of the routing segments actually built',
+      rationale: 'The developed length is the sum of the segments, and every consumer reads that one value. The length was previously computed twice by independent paths, which disagreed: double_loop reported 21.2 m in the fabrication report while the residence time and the CIRAD compliance test used 20.0 m.', isUserInput: false,
+    },
+    {
+      id: 'asm-bend-radius', category: 'Process Condition', parameterName: 'Bend radius ratio', symbol: 'R/D',
+      value: bendRadiusRatio.toFixed(2), unit: '-', basis: 'Centreline bend radius as a multiple of tube outside diameter',
+      rationale: 'Clamped to 1.0-6.0. Previously taken raw, so a negative value produced a negative bend radius and a negative elbow arc length in the fabrication report.', isUserInput: false,
+    },
+    {
+      id: 'asm-wall-thickness', category: 'Process Condition', parameterName: 'Tube wall thickness', symbol: 't',
+      value: tubeWallThicknessMm.toFixed(2), unit: 'mm', basis: 'Nominal wall thickness for the tube size',
+      rationale: 'Clamped to 1.0-6.0 mm and kept below 5% of the outside diameter. Previously raw, so a 300 mm wall gave a negative inner diameter and a negative steel mass.', isUserInput: false,
     },
     {
       id: 'asm-product-approach', category: 'Process Condition', parameterName: 'Product-to-exhaust-air temperature approach', symbol: 'ΔT_approach',
