@@ -230,7 +230,30 @@ export interface HeatExchangerSpecs {
   tubesPerPass: number;
   totalTubesCount: number;
   airSidePressureDropPa: number;
+  /** Mean face velocity over the open frontal area of the bundle, m/s. */
   airFaceVelocityMperS: number;
+  /**
+   * Velocity in the leading gap, the first restriction the air meets, m/s. Higher
+   * than the mean because the air accelerates through each row. This is the local
+   * condition that governs the film coefficient, since h scales as v^0.8.
+   */
+  leadingPassageVelocityMperS: number;
+  /** Open frontal area of the bundle, m². V_dot / airFaceVelocityMperS. */
+  bundleFreeAreaM2: number;
+  /** Gross casing cross-section before element blockage, m². */
+  casingGrossAreaM2: number;
+  /** Frontal area blocked by the element row, m². */
+  blockedAreaM2: number;
+  /** Casing width across the tube rows, m. */
+  casingWidthM: number;
+  /** Casing height transverse to the tube rows (the L_exposed term), m. */
+  casingHeightM: number;
+  /** Projected blocking diameter of one element across the flow, mm. */
+  elementBlockingDiameterMm: number;
+  /** Elements laid across the casing, i.e. tubes in the first row. */
+  elementCountPerRow: number;
+  /** Gas-side mass velocity over the free area, kg/(m²·s). The U correlator. */
+  airMassVelocityKgM2S: number;
 }
 
 export type SourceClassification =

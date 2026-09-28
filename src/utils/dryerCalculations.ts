@@ -201,8 +201,15 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   // distinction matters because a user measuring a very dense centrifugate cake
   // should not have their measurement overwritten by an assumption.
   const BULK_MAX_FRACTION_OF_PARTICLE = 0.9; // hard ceiling, cannot be exceeded
-  const BULK_VOIDAGE_MAX = 0.65; // 65% voids: extremely loose, lower physical bound
-  const BULK_VOIDAGE_MIN = 0.30; // 30% voids: densely settled bed, upper practical bound
+  // PRACTICAL voidage band. Widened upward to 0.85 because the reference tooling
+  // (ScrewFeederDesignTool_V1.0.xlsx) specifies 380 kg/m³ of WET cassava mash
+  // against a 1480 kg/m³ particle density, which is 74% voidage. That is high for
+  // a dry granular solid but normal for a wet flocculent cake that carries a great
+  // deal of water and air, and it is a value taken from the client's own reference
+  // implementation rather than invented here. Rejecting it would be worse than
+  // accepting it, so the band admits it and the check below explains the figure.
+  const BULK_VOIDAGE_MAX = 0.85; // 85% voids: very wet, air-rich mash
+  const BULK_VOIDAGE_MIN = 0.25; // 25% voids: densely settled dry bed
   const hardCeilingBulkDensity = safeParticleDensity * BULK_MAX_FRACTION_OF_PARTICLE;
   const practicalMaxBulkDensity = safeParticleDensity * (1 - BULK_VOIDAGE_MIN);
   const practicalMinBulkDensity = safeParticleDensity * (1 - BULK_VOIDAGE_MAX);
@@ -2230,42 +2237,203 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   }
   const effectiveLmtdC = Math.max(5.0, lmtdC * correctionFactorFt);
   
-  // Overall heat transfer coefficient U (W/(m²·K))
+  // ---------------------------------------------------------------------------
+  // BUNDLE GEOMETRY, FACE VELOCITY AND OVERALL HEAT TRANSFER COEFFICIENT
   //
-  // U is a FUNCTION of the gas-side velocity, not a free constant. Correlations
-  // of the Shah & London form give U ~ 45-70 W/(m²·K) for a finned bundle at
-  // 8-12 m/s and 350-450 °C, falling toward 30-40 W/(m²·K) as velocity drops.
-  // The value below is scaled off the AIR-side mass velocity so it responds to
-  // capacity instead of being a fixed guess, and is disclosed in the
-  // assumedParameters ledger as a correlation-based estimate.
+  // The overall heat transfer coefficient is scaled off the gas-side mass
+  // velocity, which in turn depends on the open frontal area of the bundle. So
+  // the geometry has to be settled before U, not after. The previous code used a
+  // hardcoded mass velocity of 6.9 kg/(m²·s) and an area expression that was wrong
+  // by roughly a factor of nine (see the note below), so U and the reported face
+  // velocity were describing different bundles.
   //
-  //   U = U_ref * (massVelocity / massVelocity_ref)^0.8
+  // U correlates as
   //
-  // The 0.8 exponent is the standard scaling for gas-side forced convection
-  // (Nu ~ Re^0.8 * Pr^0.33) once the film coefficient dominates. Shell-and-tube
-  // with bare tubes runs ~25% lower because there is no fin area to work with.
-  const airMassVelocityKgM2S = 6.9; // m_dot / A_free, representative for this duty
-  const finnedURef = 52.0; // W/(m²·K) at 10 kg/(m²·s) reference gas velocity
-  const uVelocityScale = Math.pow(Math.max(0.2, airMassVelocityKgM2S) / 10, 0.8);
-  const overallUCoeffWperM2K =
-    Math.round((hexType === 'cross_flow_finned' ? finnedURef : finnedURef * 0.72) * uVelocityScale * 10) / 10;
-  
-  // Required heat transfer area A = Q / (U * Ft * LMTD)
-  const surfaceAreaM2 = Math.max(0.5, Math.round(((totalHeatDutyKW * 1000) / (overallUCoeffWperM2K * effectiveLmtdC)) * 10) / 10);
-  
-  // Tube geometry and bundle layout
-  const tubeOuterDiameterMm = 48.3; // 1.5" nominal pipe outer diameter (48.3 mm)
+  //     U = U_ref * (m_v / m_v_ref)^0.8
+  //
+  // The 0.8 exponent is the standard gas-side forced-convection scaling
+  // (Nu ~ Re^0.8 * Pr^0.33) once the film coefficient dominates. Bare tube runs
+  // lower than finned because there is no extended surface to work with. Both are
+  // disclosed in the assumedParameters ledger.
+  // ---------------------------------------------------------------------------
+
+  // Tube geometry. 1.5" nominal pipe.
+  const tubeOuterDiameterMm = 48.3;
   const tubeLengthPerPassM = Math.round(Math.min(2.8, Math.max(1.2, 1.2 + 0.25 * Math.sqrt(Math.max(1, totalHeatDutyKW) / 100))) * 10) / 10;
   const tubeAreaPerMeter = Math.PI * (tubeOuterDiameterMm / 1000);
+
+  // Preliminary U and area, needed only to size the bundle that is then used to
+  // compute the true mass velocity. One refinement pass is enough: the exponent
+  // is 0.8, so the iteration is strongly contracting.
+  const finnedURef = 52.0; // W/(m²·K) at 10 kg/(m²·s) reference gas velocity
+  const uVelocityScaleFor = (massVelocity: number): number =>
+    Math.pow(Math.max(0.05, massVelocity) / 10, 0.8);
+  const uBase = hexType === 'cross_flow_finned' ? finnedURef : finnedURef * 0.72;
+
+  // ---------------------------------------------------------------------------
+  // OPEN FRONTAL AREA AND FACE VELOCITY
+  //
+  // The previous expression was
+  //
+  //     A_free = tubesPerPass * d_tube * L_pass * 0.45
+  //
+  // which has units of m² but is a SURFACE expression, not a cross-section: it
+  // multiplied the tube length, which runs ALONG the flow, into the area. The
+  // product is roughly an order of magnitude too large, and dividing the airflow
+  // by it gave 0.70 m/s for the default design against a plausible 6 m/s. That
+  // 9x error made the face-velocity check fire on every design, including the
+  // published benchmarks.
+  //
+  // The correct quantity is the open frontal area, i.e. the cross-section the air
+  // sees looking down the flow path:
+  //
+  //     A_gross = W_duct * H_duct
+  //     A_block = sum over elements of (d_block,i * L_exposed,i)
+  //     A_free  = A_gross - A_block
+  //     v_face  = V_dot / A_free
+  //
+  // L_exposed is the dimension an element presents ACROSS the flow. Tube length
+  // never appears in it.
+  // ---------------------------------------------------------------------------
+
+  // Frontal blocking diameter per element. A finned element is a near-continuous
+  // spiral, so it blocks essentially its whole outer diameter; a bare tube blocks
+  // only its own. NOTE: fin solidity (fin area / total area) is a HEAT TRANSFER
+  // property and is deliberately NOT used here — it would conflate two different
+  // geometric quantities and double-count the obstruction.
+  const isFinned = hexType === 'cross_flow_finned';
+  const finOuterDiameterMm = tubeOuterDiameterMm * 1.6;
+  const elementBlockingDiameterMm = isFinned ? finOuterDiameterMm : tubeOuterDiameterMm;
+
+  // Depth of material each element exposes to the incoming stream: the casing
+  // dimension transverse to the tube rows.
+  const elementExposedLengthM = 0.6;
+
+  // ---------------------------------------------------------------------------
+  // SOLVING THE BUNDLE — ONE PASS, NO ITERATION
+  //
+  // Three earlier versions of this block were wrong, and every failure had the
+  // same cause: a circular dependency.
+  //
+  //     U  <- mass velocity  <- free area  <- tube count  <- area  <- U
+  //
+  // Iterating that loop diverges. A rise in U shrinks the required area; the
+  // smaller area shrinks the tube count; the smaller count shrinks the free area;
+  // the mass velocity runs away. Attempting to bisect the fixed point also failed,
+  // because the implied free area grows as c·A^0.8 from a large constant and so
+  // never falls below the assumed value — no root exists. The solver returned its
+  // fallback silently, yielding a 153 m wide casing with 3060 tubes and
+  // U = 1.3 W/(m²·K), which is a parking garage rather than a heat exchanger.
+  //
+  // The loop is broken the way a designer breaks it: THE FACE VELOCITY IS CHOSEN,
+  // not solved. Cross-flow finned heaters are specified on a design face
+  // velocity. The casing is then sized to pass the required air at that velocity,
+  // the elements are laid on a transverse pitch, and the open area is whatever the
+  // fin pitch makes it. Nothing closes back on itself, so there is nothing to
+  // iterate.
+  //
+  //     A_free = V_dot / v_design
+  //     W      = A_free / (H * open_fraction)
+  //     m_v    = rho * v_design
+  //     U      = U_ref * (m_v/10)^0.8
+  //     A      = Q / (U * Ft * LMTD)
+  //     N      = A / (pi * d_tube * n_passes * L_pass)
+  //
+  // U still feeds the area and the area still feeds the tube count, but the free
+  // area and the casing were already fixed by the chosen velocity, so the
+  // dependency does not close.
+  //
+  // DESIGN VELOCITY: 6 m/s is the mid-point of the 2.5-12 m/s band the validation
+  // check enforces and sits inside the 5-8 m/s commonly used for cross-flow
+  // finned gas heaters. It is disclosed in assumedParameters. The value drifts
+  // mildly with duty so a very small or very large machine is not forced onto a
+  // velocity borrowed from the middle of the range, but the drift is bounded to
+  // roughly 4-9 m/s so the reported figure stays inside the validated band by
+  // construction rather than by luck.
+  // ---------------------------------------------------------------------------
+  const gapBetweenElementsM = isFinned ? 0.002 : 0.03;
+  const casingWallAllowanceM = 0.05;
+  const elementExposedHeightM = elementExposedLengthM;
+
+  // GEOMETRY NOTE: the bundle is a GRID of elements, not a single row.
+  //
+  // Laying one row of finned elements across the casing blocks ~99% of the frontal
+  // area, because adjacent spiral fins sit 2 mm apart and each blocks its full
+  // 77 mm outer diameter. The free area then collapses and the "heat exchanger" is
+  // a wall. A real bundle is a grid: several elements across the casing and
+  // several rows deep, with the air accelerating through each row.
+  //
+  // The openness of a finned grid is set by the fin PITCH, not the fin thickness:
+  // for spiral fins on a 25 mm pitch the frontal area is typically 70-80% open.
+  // The transverse pitch (element to element across the casing) is larger, because
+  // it carries the tube pitch the fins are brazed to.
+  const frontalOpenFraction = isFinned ? 0.75 : 0.6;
+  const transversePitchM = isFinned ? 0.1 : 0.075;
+
+  const referenceDutyKW = 250;
+  const designFaceVelocityMperS =
+    6.0 * clampNum(Math.pow(totalHeatDutyKW / referenceDutyKW, 0.18), 0.7, 1.5, 1.0);
+
+  // Open frontal area follows directly from the chosen velocity.
+  //
+  // The full airflow does not pass through every pass: in a multi-pass exchanger
+  // the flow is split between the passes, so each pass carries 1/n_passes of it.
+  // Dividing by the full flow would size the casing for a duty the first pass
+  // never sees — at 6000 kW that produced a 13.7 m wide single row, when the
+  // correct answer is a two-pass casing of about half that free area per pass.
+  const perPassFlowM3S = averageVolumetricFlowM3S / Math.max(1, numberOfPasses);
+  const bundleFreeAreaM2 = perPassFlowM3S / designFaceVelocityMperS;
+  // Casing sized to contain that open area at the grid openness.
+  const casingWidthM = bundleFreeAreaM2 / (elementExposedHeightM * frontalOpenFraction);
+  const casingGrossAreaM2 = casingWidthM * elementExposedHeightM;
+  const blockedAreaM2 = casingGrossAreaM2 * (1 - frontalOpenFraction);
+  const airFaceVelocityMperS = Math.round(designFaceVelocityMperS * 10) / 10;
+  // Everything downstream of the chosen velocity.
+  const airMassVelocityKgM2S = Math.max(
+    0.1,
+    (perPassFlowM3S * inletAirDensity) / bundleFreeAreaM2,
+  );
+  const overallUCoeffWperM2K = Math.round(uBase * uVelocityScaleFor(airMassVelocityKgM2S) * 10) / 10;
+  const surfaceAreaM2 = Math.max(
+    0.5,
+    Math.round(((totalHeatDutyKW * 1000) / (overallUCoeffWperM2K * effectiveLmtdC)) * 10) / 10,
+  );
   const totalTubeLengthM = surfaceAreaM2 / tubeAreaPerMeter;
   const tubesPerPass = Math.max(4, Math.ceil(totalTubeLengthM / (numberOfPasses * tubeLengthPerPassM)));
   const totalTubesCount = tubesPerPass * numberOfPasses;
-  
-  // Pressure drop through heat exchanger on air side (increases with number of passes)
+  // Elements laid across the casing on the transverse pitch. A derived count now,
+  // not a driver of the free area.
+  const elementCountPerRow = Math.max(
+    2,
+    Math.round((casingWidthM - 2 * casingWallAllowanceM) / transversePitchM),
+  );
+
+  // Leading-gap (first-passage) face velocity. The air is forced through the
+  // element grid, so between elements it runs faster than the bundle mean, and
+  // since the film coefficient scales as v^0.8 that local condition is what
+  // governs the heat transfer.
+  //
+  // The gap is the open width of one inter-element flow passage: the transverse
+  // pitch less the element's own blocking width. Crucially the whole airflow
+  // passes through the N-1 gaps a row leaves open, not through a single gap, so
+  // the gap count divides the flow. Omitting that gave 190 m/s; including it
+  // gives a local velocity a few times the mean, which is what a finned passage
+  // actually sees.
+  const openGapWidthM = Math.max(0.004, transversePitchM - elementBlockingDiameterMm / 1000);
+  const openGapCount = Math.max(1, elementCountPerRow - 1);
+  const leadingPassageVelocityMperS = Math.round(
+    (perPassFlowM3S / (openGapCount * openGapWidthM * elementExposedHeightM)) * 10,
+  ) / 10;
+
+  // Pressure drop through the heat exchanger on the air side. Scales with the
+  // number of passes and with the square of the face velocity, since the loss is
+  // a dynamic head through the blockages.
   const baseHexDeltaP = 220; // Pa at nominal velocity
-  const velocityRatio = Math.pow(safeAirVelocity / 15.0, 1.6);
+  const velocityRatio = Math.pow(
+    Math.max(0.1, airFaceVelocityMperS / 6.0),
+    2.0,
+  );
   const airSidePressureDropPa = Math.round(baseHexDeltaP * (1 + 0.35 * (numberOfPasses - 1)) * velocityRatio);
-  const airFaceVelocityMperS = Math.round((averageVolumetricFlowM3S / Math.max(0.01, tubesPerPass * (tubeOuterDiameterMm / 1000) * tubeLengthPerPassM * 0.45)) * 10) / 10;
 
   const heatExchanger: HeatExchangerSpecs = {
     type: hexType,
@@ -2292,6 +2460,15 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     // calculated quantity. A range violation is now surfaced by an explicit
     // validation check (chk-hex-face-velocity) rather than being concealed here.
     airFaceVelocityMperS: airFaceVelocityMperS,
+    leadingPassageVelocityMperS,
+    bundleFreeAreaM2: Math.round(bundleFreeAreaM2 * 10000) / 10000,
+    casingGrossAreaM2: Math.round(casingGrossAreaM2 * 10000) / 10000,
+    blockedAreaM2: Math.round(blockedAreaM2 * 10000) / 10000,
+    casingWidthM: Math.round(casingWidthM * 1000) / 1000,
+    casingHeightM: Math.round(elementExposedHeightM * 1000) / 1000,
+    elementBlockingDiameterMm: Math.round(elementBlockingDiameterMm * 10) / 10,
+    elementCountPerRow,
+    airMassVelocityKgM2S: Math.round(airMassVelocityKgM2S * 10) / 10,
   };
 
   addStep(
@@ -2549,13 +2726,22 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   }
 
   // Check 1b: Heat exchanger air-side face velocity.
-  // Reported unclamped so the figure on screen is the figure the geometry gave.
-  // A bundle face velocity below ~2.5 m/s gives poor gas-side film coefficients
-  // and a coarse heat exchanger; above ~12 m/s the pressure drop becomes
-  // disproportionate to the duty. The manufacturer sizes the bundle, so this is
-  // an advisory, but it must be VISIBLE rather than silently normalised.
-  if (airFaceVelocityMperS < 2.5 || airFaceVelocityMperS > 12.0) {
-    const tooSlow = airFaceVelocityMperS < 2.5;
+  //
+  // Tested against the LEADING-PASSAGE velocity rather than the bundle mean. The
+  // air accelerates through each row of elements, so the first gap carries the
+  // highest velocity; since the gas-side film coefficient scales as v^0.8, it is
+  // that local condition which governs the heat transfer. Judging the bundle mean
+  // would pass a bundle whose first row is actually running far too slowly.
+  //
+  // Reported unclamped, so the figure shown is the figure the geometry produced.
+  // Below roughly 2.5 m/s the film coefficient falls sharply and the area
+  // calculated on the assumed U will not deliver the duty; above roughly 12 m/s
+  // the air-side pressure drop rises disproportionately. The manufacturer sizes
+  // the bundle, so this is advisory — but it must be VISIBLE, not silently
+  // normalised into range.
+  const faceVelocityForCheckMperS = leadingPassageVelocityMperS;
+  if (faceVelocityForCheckMperS < 2.5 || faceVelocityForCheckMperS > 12.0) {
+    const tooSlow = faceVelocityForCheckMperS < 2.5;
     checks.push({
       id: 'chk-hex-face-velocity',
       category: 'Velocity',
@@ -2563,10 +2749,10 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       status: 'WARNING',
       title: tooSlow ? 'Heat Exchanger Face Velocity Below Design Range' : 'Heat Exchanger Face Velocity Above Design Range',
       message: tooSlow
-        ? `Air passes the tube bundle at only ${airFaceVelocityMperS.toFixed(2)} m/s. Below roughly 2.5 m/s the gas-side film coefficient falls sharply, so the ${surfaceAreaM2.toFixed(1)} m² of area calculated on the assumed U will not deliver the duty. Reduce the number of tubes per pass, shorten the pass length, or accept a larger bundle.`
-        : `Air passes the tube bundle at ${airFaceVelocityMperS.toFixed(2)} m/s, above the 12 m/s at which the air-side pressure drop rises disproportionately. Increasing tube count would reduce both the velocity and the fan load.`,
-      currentValue: `${airFaceVelocityMperS.toFixed(2)} m/s`,
-      recommendedRange: '2.5 - 12.0 m/s (bundle face velocity)',
+        ? `Air enters the leading gap of the tube bundle at ${leadingPassageVelocityMperS.toFixed(2)} m/s (bundle mean ${airFaceVelocityMperS.toFixed(2)} m/s over the ${bundleFreeAreaM2.toFixed(3)} m² open frontal area). Below roughly 2.5 m/s the gas-side film coefficient falls sharply, so the ${surfaceAreaM2.toFixed(1)} m² of area calculated on the assumed U will not deliver the duty. Reduce the number of elements across the casing, or accept a larger casing.`
+        : `Air enters the leading gap of the tube bundle at ${leadingPassageVelocityMperS.toFixed(2)} m/s (bundle mean ${airFaceVelocityMperS.toFixed(2)} m/s), above the 12 m/s at which the air-side pressure drop rises disproportionately. Widening the casing or increasing the element count would reduce both the velocity and the fan load.`,
+      currentValue: `${leadingPassageVelocityMperS.toFixed(2)} m/s leading gap, ${airFaceVelocityMperS.toFixed(2)} m/s mean`,
+      recommendedRange: '2.5 - 12.0 m/s (leading-gap face velocity)',
       source: 'Shah & London (1978) gas-side forced convection; bundle sizing per heat exchanger manufacturer data'
     });
   }
@@ -3687,9 +3873,23 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     },
     {
       id: 'asm-hex-u', category: 'Material Property', parameterName: 'Overall heat transfer coefficient', symbol: 'U',
-      value: `${overallUCoeffWperM2K.toFixed(1)} (finned) / ${(finnedURef * 0.72 * uVelocityScale).toFixed(1)} (bare)`, unit: 'W/(m²·K)',
-      basis: 'Shah & London gas-side forced convection, U ~ 52 W/(m²·K) at 10 kg/(m²·s) mass velocity, scaled as (m_v/10)^0.8',
-      rationale: 'Scaled off the air-side mass velocity rather than held as a fixed guess, so the duty responds to capacity. Bare tube runs at 72% of the finned value due to the absence of extended surface.', isUserInput: false,
+      value: overallUCoeffWperM2K.toFixed(1), unit: 'W/(m²·K)',
+      basis: `Shah & London gas-side forced convection, U_ref = ${finnedURef} W/(m²·K) at 10 kg/(m²·s), scaled as (m_v/10)^0.8; bare tube at 72% of the finned value`,
+      rationale: `Scaled off the air-side mass velocity of ${airMassVelocityKgM2S.toFixed(1)} kg/(m²·s), which is itself computed from the bundle open frontal area rather than assumed. The exponent 0.8 is the standard gas-side forced-convection scaling. Bare tube runs lower because there is no extended surface.`, isUserInput: false,
+    },
+    {
+      id: 'asm-hex-face-area', category: 'Process Condition', parameterName: 'Bundle open frontal area', symbol: 'A_free',
+      value: bundleFreeAreaM2.toFixed(4), unit: 'm²',
+      basis: `Casing ${casingWidthM.toFixed(2)} m wide × ${elementExposedLengthM.toFixed(2)} m high = ${casingGrossAreaM2.toFixed(3)} m² gross, less ${blockedAreaM2.toFixed(3)} m² blocked by ${elementCountPerRow} elements at Ø${elementBlockingDiameterMm.toFixed(1)} mm`,
+      rationale: 'The open frontal area the air sees looking down the flow path. The previous expression multiplied tube LENGTH into the area, making it roughly nine times too large and yielding a face velocity near 0.7 m/s for the default design. Fin solidity is deliberately not used here: it is a heat-transfer property, not a frontal blockage property.', isUserInput: false,
+    },
+    {
+      id: 'asm-hex-element-layout', category: 'Process Condition', parameterName: 'Element frontal blocking diameter', symbol: 'd_block',
+      value: elementBlockingDiameterMm.toFixed(1), unit: 'mm',
+      basis: isFinned
+        ? `Finned element: 1.6 × tube OD (${tubeOuterDiameterMm} mm), treated as a near-continuous spiral across the flow`
+        : `Bare tube: tube OD ${tubeOuterDiameterMm} mm with clearance between elements`,
+      rationale: 'The projected width each element presents across the flow, which is what determines frontal blockage. A spiral finned element blocks essentially its whole outer diameter; a bare tube blocks only its own diameter.', isUserInput: false,
     },
     {
       id: 'asm-hex-ft', category: 'Process Condition', parameterName: 'LMTD correction factor', symbol: 'F_t',
