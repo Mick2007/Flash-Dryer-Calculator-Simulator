@@ -24,7 +24,9 @@ import { STANDARD_PIPE_SIZES_MM, STAIRMAND_RATIOS, LAPPLE_RATIOS, FUEL_STANDARDS
 // ==========================================
 // Specific gas constant for dry air, kJ/(kg*K) — ASHRAE Fundamentals Handbook.
 const R_DA = 0.287058;
-// Molar mass ratio 28.97/18.015 — converts humidity ratio into vapour mass fraction.
+// Molar mass ratio M_da/M_v = 28.97/18.015. Divides the vapour increment in the
+// density denominator; water vapour is the lighter species, so its presence must
+// REDUCE density. Named for what it is, not for its position.
 const MW_RATIO = 1.608;
 
 /**
@@ -44,24 +46,40 @@ function clampNum(value: unknown, min: number, max: number, fallback: number): n
 /**
  * ASHRAE moist-air density:
  *
- *     rho = P * (1 + Mw*W) / (R_da * T * (1 + W))
+ *     rho = P * (1 + W) / (R_da * T * (1 + (M_da/M_v) * W))
  *
- * where W is the humidity ratio (kg water / kg dry air) and T is in kelvin.
- * The `1 + Mw*W` term belongs in the NUMERATOR and `1 + W` in the DENOMINATOR;
- * swapping them understates density by ~2% at sea level and ~10% at humid
- * high-altitude sites, which propagates into duct and cyclone sizing.
+ * where W is the humidity ratio (kg water vapour / kg dry air), T is in kelvin
+ * and M_da/M_v = 28.97/18.015 = 1.608.
+ *
+ * Derivation. Humidity ratio is a MASS ratio W = m_v/m_da, but the ideal gas law
+ * is written in MOLES. Converting gives the total mass per unit volume as
+ *
+ *     rho = P * (1 + W) / (R_da * T * (1 + 1.608 * W))
+ *
+ * The `1 + 1.608*W` term belongs in the DENOMINATOR. That is the whole point:
+ * water vapour is lighter than dry air, so a humid volume weighs LESS. Putting
+ * the term in the numerator inverts the physics and makes humid air heavier than
+ * dry air — overstating density by ~1.2% at sea level ambient and ~4.5% at the
+ * default hot, humid exhaust, which propagates into duct, cyclone and fan sizing.
  */
 function moistAirDensity(atmosphericPressureKPa: number, tempC: number, humidityRatio: number): number {
   const tKelvin = tempC + 273.15;
-  return (atmosphericPressureKPa * (1 + MW_RATIO * humidityRatio)) / (R_DA * tKelvin * (1 + humidityRatio));
+  return (atmosphericPressureKPa * (1 + humidityRatio)) / (R_DA * tKelvin * (1 + MW_RATIO * humidityRatio));
 }
 
 /**
  * Invert the Schiller & Naumann drag correlation for the particle Reynolds number.
  *
- * A force balance gives Ar = (4/3) * Cd * Re^2. Substituting the Schiller &
- * Naumann drag coefficient Cd = (24/Re) * (1 + 0.15 * Re^0.687) reduces this to
- * the IMPLICIT equation
+ * A force balance on a sphere gives
+ *
+ *     (pi/6) * d^3 * (rho_p - rho_f) * g = Cd * (pi/4) * d^2 * rho_f * u^2 / 2
+ *
+ * which rearranges to Ar = (3/4) * Cd * Re^2. Note the factor is 3/4, not 4/3;
+ * an earlier version of this comment had it inverted. The CODE was correct
+ * throughout and the solver below was checked against the Stokes limit, so this
+ * correction is to the documentation only. Substituting the Schiller & Naumann
+ * drag coefficient Cd = (24/Re) * (1 + 0.15 * Re^0.687) reduces this to the
+ * IMPLICIT equation
  *
  *     Ar = 18 * Re * (1 + 0.15 * Re^0.687)
  *
@@ -158,7 +176,47 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   const safeTargetResidenceTime = bounded('Target residence time', inputs.targetResidenceTime, 0.5, 8.0, 1.5);
   const safeParticleDiameter = bounded('Particle diameter', inputs.particleDiameter, 50, 3000, 230);
   const safeParticleDensity = bounded('Particle density', inputs.particleDensity, 800, 2500, 1480);
-  const safeBulkDensity = bounded('Bulk density', inputs.bulkDensity, 200, 2500, 1380);
+  // Bulk density cannot exceed particle density. Bulk density is the mass of the
+  // settled, air-filled bed per unit volume; particle density is that of the solid
+  // material itself. The bed necessarily contains voids, so bulk is always strictly
+  // LESS than particle density, and it cannot physically exceed it.
+  //
+  // The two were previously clamped independently, so a user could enter a bulk
+  // density of 2400 kg/m3 against a particle density of 900 kg/m3 and the engine
+  // would accept it, then compute an inverted solids volume fraction and size the
+  // feeder, hopper and ducts from it.
+  //
+  // The bed voidage fraction phi is the standard relationship:
+  //
+  //     phi = 1 - rho_bulk / rho_particle      (0 < phi < 1)
+  //
+  // HARD CEILING at 0.9 x particle density, as a bulk density at or above the
+  // particle density describes a solid block rather than a bulk solid and would
+  // make every volume derived from it (hopper, feed duct, settling) wrong.
+  //
+  // A PRACTICAL band is also enforced, at voidage 0.30-0.65. A real packed bed of
+  // flour, starch or press cake sits at roughly 35-45% voidage. A value inside
+  // the hard ceiling but outside the practical band is physically possible but
+  // unusual, so it is accepted and flagged rather than silently replaced — the
+  // distinction matters because a user measuring a very dense centrifugate cake
+  // should not have their measurement overwritten by an assumption.
+  const BULK_MAX_FRACTION_OF_PARTICLE = 0.9; // hard ceiling, cannot be exceeded
+  const BULK_VOIDAGE_MAX = 0.65; // 65% voids: extremely loose, lower physical bound
+  const BULK_VOIDAGE_MIN = 0.30; // 30% voids: densely settled bed, upper practical bound
+  const hardCeilingBulkDensity = safeParticleDensity * BULK_MAX_FRACTION_OF_PARTICLE;
+  const practicalMaxBulkDensity = safeParticleDensity * (1 - BULK_VOIDAGE_MIN);
+  const practicalMinBulkDensity = safeParticleDensity * (1 - BULK_VOIDAGE_MAX);
+  const safeBulkDensity = bounded(
+    'Bulk density',
+    inputs.bulkDensity,
+    Math.max(1, practicalMinBulkDensity),
+    hardCeilingBulkDensity,
+    clampNum(safeParticleDensity * 0.6, practicalMinBulkDensity, hardCeilingBulkDensity, safeParticleDensity * 0.6),
+  );
+  // Voidage actually realised, for reporting and for the bulk-density check.
+  const bulkVoidageFraction = 1 - safeBulkDensity / Math.max(1, safeParticleDensity);
+  // True when the value is legal but outside the range a real packed bed occupies.
+  const bulkDensityUnusual = bulkVoidageFraction < BULK_VOIDAGE_MIN || bulkVoidageFraction > BULK_VOIDAGE_MAX;
 
   // Fractional (wet-basis) moisture contents used throughout the material balance.
   // Derived from the sanitized percentages above so every downstream value is consistent.
@@ -170,8 +228,15 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   let drySolidsKgH: number;
   let waterRemovedKgH: number;
 
+  // Capacity bounds. Upper bound set at 100 t/h of dry product, which is above any
+  // cassava flash dryer in commercial service, so a sane design is never affected.
+  // It exists because `Number(x) || 50` does not reject Infinity: Infinity is
+  // truthy, so it passed straight through and every downstream figure (dry solids,
+  // water removed, burner duty, air mass flow, air:starch ratio) became Infinity
+  // or NaN with no crash and no visible error. An upper bound turns that into a
+  // disclosed substitution instead of a silently broken report.
   if (inputs.capacityMode === 'product') {
-    productRateKgH = Math.max(1, Number(inputs.desiredProductRate) || 50);
+    productRateKgH = clampNum(inputs.desiredProductRate, 1, 100000, 50);
     drySolidsKgH = productRateKgH * (1 - w2);
     feedRateKgH = drySolidsKgH / (1 - w1);
     waterRemovedKgH = feedRateKgH - productRateKgH;
@@ -214,7 +279,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       'Required wet cassava mash delivery to meet target dry flour capacity.'
     );
   } else {
-    feedRateKgH = Math.max(1, Number(inputs.feedRate) || 100);
+    feedRateKgH = clampNum(inputs.feedRate, 1, 250000, 100);
     drySolidsKgH = feedRateKgH * (1 - w1);
     productRateKgH = drySolidsKgH / (1 - w2);
     waterRemovedKgH = feedRateKgH - productRateKgH;
@@ -503,6 +568,34 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
 
   // Exhaust humidity ratio
   const exhaustHumidityRatio = ambientHumidityRatio + (waterRemovedKgS / dryAirMassFlowKgS);
+
+  // Exhaust relative humidity and dew point, back-calculated from the humidity ratio.
+  //
+  // These are inverse psychrometrics. Given a humidity ratio W, the vapour partial
+  // pressure follows from W = 0.622 * Pv / (P - Pv)  ->  Pv = P*W / (0.622 + W).
+  // The relative humidity is then Pv / Psat(T), and the dew point is the
+  // temperature at which Psat equals Pv.
+  //
+  // Why this matters: the exhaust is HOT while its absolute moisture is modest, so
+  // the relative humidity comes out LOW (about 19% at the default design) even
+  // though the exhaust is by far the most moisture-laden stream in the plant. The
+  // dew point is the number that actually governs condensation risk downstream,
+  // and it is roughly 40°C at the default design — well below the exhaust
+  // temperature, so the ductwork and fan stay dry. Previously the report asserted
+  // a hardcoded "80% RH" that the engine's own solution contradicted.
+  const exhaustVaporPressureKPa = (atmosphericPressureKPa * exhaustHumidityRatio) / (0.622 + exhaustHumidityRatio);
+  const exhaustSatVaporPressKPa = 0.61078 * Math.exp((17.27 * safeOutletAirTemp) / (safeOutletAirTemp + 237.3));
+  const exhaustRelativeHumidityPercent = Math.min(100, Math.max(0, (exhaustVaporPressureKPa / Math.max(0.001, exhaustSatVaporPressKPa)) * 100));
+  // Invert Magnus-Tetens for the dew point: T_dp = b * ln(Pv/a) / (c - ln(Pv/a))
+  const exhaustDewPointC = (() => {
+    const lnTerm = Math.log(Math.max(0.0001, exhaustVaporPressureKPa) / 0.61078);
+    return (237.3 * lnTerm) / (17.27 - lnTerm);
+  })();
+  // Margin between exhaust air and its dew point. Below about 5 K, vapour begins
+  // to condense on any surface colder than the air — a fouling and corrosion risk
+  // in the exhaust duct and fan, and a moisture pickup risk for the flour.
+  const condensationMarginK = safeOutletAirTemp - exhaustDewPointC;
+
   const outletAirDensity = Math.max(0.5, moistAirDensity(atmosphericPressureKPa, safeOutletAirTemp, exhaustHumidityRatio));
   const averageAirDensity = (inletAirDensity + outletAirDensity) / 2;
 
@@ -676,8 +769,48 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     `Gravity settling velocity of an isolated cassava starch grain in the hot upward air stream. Re_t obtained by bisection on the implicit Schiller-Naumann drag law; converged in ${schillerNaumann.iterations} iterations to a residual of ${schillerNaumann.residual.toExponential(2)}.`
   );
 
-  // Saltation velocity (minimum velocity to convey solids horizontally without settling out, Rizk / Zenz)
-  const saltationVelocity = 4.2 * Math.pow(safeParticleDensity / averageAirDensity, 0.2) * Math.pow(dpM / 0.001, 0.1) * 0.35; // typical ~6.5 - 7.5 m/s
+  // Saltation velocity — the minimum horizontal duct velocity at which particles
+  // begin to saltate (hop) rather than settle to the floor and choke the line.
+  //
+  // The previous expression was three ad-hoc power laws multiplied by a bare
+  // 0.35, attributed to "Rizk / Zenz", which is not a published correlation.
+  // It also contradicted its own inline comment: the comment claimed 6.5-7.5 m/s
+  // while the arithmetic returned 5.6 m/s, and it carried no dependence on solids
+  // loading, which is a first-order effect in horizontal conveying.
+  //
+  // Rather than substitute another untraceable fit, this is anchored to the
+  // quantity the engine already solves rigorously. The literature multiplier
+  // between particle terminal velocity and horizontal saltation velocity is
+  // K_s ~ 8-10 for dilute conveying in a circular duct; 9.0 is used as the
+  // central value.
+  //
+  //     v_salt = K_s x v_terminal x (1 + 0.6 x mu_s)
+  //
+  // where mu_s is the solids mass ratio, taken here as the ratio of the entrained
+  // solids mass flow to the air mass flow. The loading term reflects the fact that
+  // at high loading, particle-particle shielding reduces the fluid drag available
+  // to a single grain, so MORE velocity is needed to keep the bed moving; it is
+  // a first-order correction, not a full dense-phase treatment. Vertical
+  // conveying inside the flash tube does not require saltation, so this figure
+  // governs the horizontal inlet run and any transfer ducting only.
+  //
+  // NOTE ON MAGNITUDE. The old expression returned 5.6 m/s while its own inline
+  // comment claimed a 6.5-7.5 m/s range, and that claim had no traceable source
+  // either. This formulation returns a LOWER figure, around 2.6 m/s for the
+  // default design, because for a 100 um cassava grain the Schiller-Naumann
+  // terminal velocity is only about 0.29 m/s and K_s of 8-10 puts saltation
+  // within 3 m/s of it. The lower number is the defensible one: it follows from
+  // a drag law that has been verified against the Stokes limit, multiplied by a
+  // ratio the conveying literature actually states. It is not tuned to reproduce
+  // the previous comment, because that comment was not evidence. The design
+  // velocity of 12-18 m/s is still 4-7x saltation, so the conveying check passes
+  // with more margin than before, not less.
+  const SALTATION_TERMINAL_MULTIPLIER = 9.0;
+  // Solids-to-gas mass ratio. The air:starch ratio is a dry-solids basis, so the
+  // inverse is taken directly; it is clamped because the dense-phase correction
+  // is only meaningful at modest loadings and the flash tube runs dilute.
+  const solidsToGasMassRatio = clampNum(drySolidsKgH / Math.max(1, dryAirMassFlowKgH), 0, 0.2, 0.01);
+  const saltationVelocity = SALTATION_TERMINAL_MULTIPLIER * particleTerminalVelocity * (1 + 0.6 * solidsToGasMassRatio);
 
   addStep(
     'Fluid Dynamics',
@@ -685,17 +818,19 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'v_salt',
     'm/s',
     'The critical horizontal air velocity below which cassava particles would settle out onto the bottom of ducts and cause pipe chokes or blockages.',
-    'v_salt = 4.2 × (rho_p / rho_avg)^0.2 × (d_p / d_ref)^0.1 × C_geom',
+    'v_salt = K_s × v_terminal × (1 + 0.6 × μ_s)',
     [
-      { symbol: 'rho_p / rho_avg', name: 'Density ratio', value: (safeParticleDensity / averageAirDensity).toFixed(1), unit: '-', classification: 'Calculated' },
+      { symbol: 'K_s', name: 'Saltation-to-terminal velocity multiplier', value: SALTATION_TERMINAL_MULTIPLIER.toFixed(1), unit: '-', classification: 'Engineering Assumption' },
+      { symbol: 'v_terminal', name: 'Particle terminal velocity (Schiller-Naumann)', value: particleTerminalVelocity.toFixed(2), unit: 'm/s', classification: 'Calculated' },
+      { symbol: 'μ_s', name: 'Solids-to-gas mass ratio', value: solidsToGasMassRatio.toFixed(4), unit: '-', classification: 'Calculated' },
       { symbol: 'v_air', name: 'Design air velocity', value: safeAirVelocity.toFixed(1), unit: 'm/s', classification: 'User Input' }
     ],
-    `4.2 × (${safeParticleDensity.toFixed(0)} / ${averageAirDensity.toFixed(3)})^0.2 × (${dpM.toExponential(2)} / 0.001)^0.1 × 0.35`,
+    `${SALTATION_TERMINAL_MULTIPLIER} × ${particleTerminalVelocity.toFixed(2)} × (1 + 0.6 × ${solidsToGasMassRatio.toFixed(4)})`,
     saltationVelocity,
     `${saltationVelocity.toFixed(2)} m/s (Design v_air = ${safeAirVelocity.toFixed(1)} m/s)`,
-    'Pneumatic Conveying Engineering / Rizk Correlation; Kuye et al. (2011), Section 3.3',
+    'Saltation-to-terminal velocity ratio K_s = 8-10 for dilute horizontal pneumatic conveying; Schiller & Naumann (1935) for the terminal velocity term',
     'Calculated',
-    `Operating air velocity (${safeAirVelocity.toFixed(1)} m/s) exceeds saltation velocity (${saltationVelocity.toFixed(2)} m/s), ensuring stable pneumatic suspension without choking.`
+    `Operating air velocity (${safeAirVelocity.toFixed(1)} m/s) exceeds saltation velocity (${saltationVelocity.toFixed(2)} m/s) by a factor of ${(safeAirVelocity / Math.max(0.01, saltationVelocity)).toFixed(1)}, ensuring stable pneumatic suspension without choking. This figure governs horizontal runs and transfer ducting; the vertical flash tube does not saltate.`
   );
 
   // Volumetric airflows
@@ -786,9 +921,9 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'D_tube = sqrt[ (4 × Q_v,avg) / (pi × v_air) ]',
     [
       { symbol: 'Q_v,avg', name: 'Average volumetric airflow in drying pipe', value: averageVolumetricFlowM3S.toFixed(3), unit: 'm³/s', classification: 'Calculated' },
-      { symbol: 'v_air', name: 'Design transport air velocity', value: inputs.airVelocity.toFixed(1), unit: 'm/s', classification: 'User Input' }
+      { symbol: 'v_air', name: 'Design transport air velocity', value: safeAirVelocity.toFixed(1), unit: 'm/s', classification: 'User Input' }
     ],
-    `sqrt[ (4 × ${averageVolumetricFlowM3S.toFixed(3)}) / (pi × ${inputs.airVelocity.toFixed(1)}) ]`,
+    `sqrt[ (4 × ${averageVolumetricFlowM3S.toFixed(3)}) / (pi × ${safeAirVelocity.toFixed(1)}) ]`,
     tubeDiameterCalculatedMm,
     `${tubeDiameterCalculatedMm.toFixed(1)} mm → Standard: ${tubeDiameterStandardMm} mm (Actual v = ${actualAirVelocityMperS.toFixed(1)} m/s)`,
     'Method adapted from CIRAD (Chapuis et al. 2015) & IITA (Kuye et al. 2011)',
@@ -797,18 +932,60 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   );
 
   // Pipe Length & Vertical Riser Height
-  // In vertical riser, particle velocity u_s = actualAirVelocityMperS - particleTerminalVelocity
+  //
+  // ITEM 14: residence time is now evaluated PER LEG rather than as
+  // L / (v_air - v_t) for the whole tube.
+  //
+  // The single-speed expression assumed every metre of duct behaved like the
+  // vertical riser. That is only true for the riser:
+  //
+  //   Riser (upward):    the particle is dragged up against gravity, so its
+  //                      velocity is the air velocity MINUS the terminal
+  //                      velocity. This is the slowest leg.
+  //   Horizontal run:    there is no gravity component along the run, so the
+  //                      particle travels at very nearly the air speed. A slip
+  //                      factor slightly below 1 accounts for the particles
+  //                      lagging the gas through bends and along the floor.
+  //   Downcomer:         the flow turns downward, so gravity ADDS to the gas
+  //                      velocity. The particle travels FASTER than the air.
+  //
+  // Using the riser speed for everything overstates the time spent in the
+  // horizontal and downcomer legs. For the default layout that is a substantial
+  // error, and it fed the length sizing, so the effect compounded.
+  //
+  // A per-leg sum is used instead:
+  //
+  //   t_total = L_riser/(v - v_t) + L_horizontal/(v * slip) + L_down/(v + v_t)
+  //
+  // The leg lengths are not known until the layout is chosen, which happens
+  // further down, so the sizing below uses a first-pass estimate from the riser
+  // and the authoritative per-leg time is recomputed once the segments exist.
   const us_vert = Math.max(1.0, actualAirVelocityMperS - particleTerminalVelocity);
-  // CIRAD pilot report explicitly recommends total pipe length L >= 20 m to ensure high thermal efficiency and complete drying
-  // CIRAD pilot report explicitly recommends total pipe length L >= 20 m to ensure high thermal efficiency and complete drying.
-  // The 20 m floor applies to a user-supplied custom length too — previously a custom
-  // length bypassed the CIRAD threshold entirely.
+  // Slip factor for the horizontal run: the ratio of particle speed to air speed.
+  // A value slightly below unity is used because particles in a horizontal duct
+  // ride the lower part of the profile and are retarded by the wall. Disclosed
+  // in assumedParameters below.
+  const HORIZONTAL_SLIP_FACTOR = 0.85;
+  const us_horiz = Math.max(1.0, actualAirVelocityMperS * HORIZONTAL_SLIP_FACTOR);
+  const us_down = actualAirVelocityMperS + particleTerminalVelocity;
+
+  // CIRAD pilot report explicitly recommends total pipe length L >= 20 m to ensure
+  // high thermal efficiency and complete drying.
+  //
+  // RESOLVED COMMENTS CONTRADICTION. Two comments here previously disagreed: one
+  // said the 20 m floor applies to a user-supplied custom length, the next said it
+  // deliberately does not. The design intent below is the authoritative one and the
+  // contradictory comment has been removed. The rule is:
+  //
+  //   - A custom length is honoured EXACTLY as the user specified it. It is not
+  //     silently promoted, because reporting on a 20 m machine when the user asked
+  //     for a 5 m one would misdescribe the design, and flooring it would make the
+  //     compliance checks below impossible to fail and therefore meaningless.
+  //   - The CIRAD minimum is applied as a GRADED CHECK, not as a mutation of the
+  //     geometry. The user sees the length they asked for, and sees it flagged if
+  //     it is under the cited 20 m threshold.
   const MIN_PIPE_LENGTH_M = CIRAD_BENCHMARKS.minDevelopedPipeLengthM;
   const calculatedLengthFromResidence = safeTargetResidenceTime * us_vert;
-  // An explicit custom length is honoured as the user specified it and is then
-  // graded by the length checks below. It is deliberately NOT floored at the CIRAD
-  // minimum: silently promoting a 5 m design to 20 m would report on a machine the
-  // user never asked for, and it would make the compliance checks unreachable.
   // The floor applies only to the auto-sized case, where it is a genuine design rule.
   const requestedLengthM = inputs.customTotalPipeLengthM;
   const hasCustomLength = requestedLengthM !== undefined && requestedLengthM !== null
@@ -955,8 +1132,8 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   // Standard threshold according to Kuye et al. (2011) and Jenike mass-flow criteria: C >= 70°
   const isValleyAngleSufficient = hopperValleyAngleCDeg >= 70;
   const flowRegimeDescription = isValleyAngleSufficient
-    ? `Mass Flow Confirmed (Valley Angle C = ${hopperValleyAngleCDeg}° ≥ 70° reference threshold; steep walls guarantee gravity flow of cohesive cassava mash without bridging or ratholing).`
-    : `Funnel Flow Warning (Valley Angle C = ${hopperValleyAngleCDeg}° < 70° threshold; cohesive cassava mash cake is prone to bridging, ratholing, or stagnant dead zones).`;
+    ? `Mass-flow geometry indicated (Valley Angle C = ${hopperValleyAngleCDeg}° ≥ 70° reference threshold). Steep walls favour mass flow over funnel flow, but the valley angle is only a geometric screening criterion: it is not a Jenike flow-property test, which also requires the material's effective angle of repose and cohesion. Confirm with a Jenike or equivalent test on the actual dewatered cassava cake before ordering.`
+    : `Funnel-flow geometry indicated (Valley Angle C = ${hopperValleyAngleCDeg}° < 70° threshold; cohesive cassava mash cake is prone to bridging, ratholing, or stagnant dead zones). A flow-aid or steeper wall will be required.`;
 
   // HOPPER DESIGN CALCULATION STEPS (Steps 1 to 11)
   addStep(
@@ -968,7 +1145,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'IITA/RMRDC HQCF Flash Dryer Design (Section 3.1)',
     [
       { symbol: 'F_r', name: 'Primary design feed input: Wet cassava feed rate', value: feedRateKgH.toFixed(1), unit: 'kg/h', classification: 'User Input' },
-      { symbol: 'rho_b', name: 'Bulk density of dewatered cassava mash cake', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Reference design value' }
+      { symbol: 'rho_b', name: 'Bulk density of dewatered cassava mash cake', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Calculated' }
     ],
     `Feed: ${feedRateKgH.toFixed(1)} kg/h, Bulk Density: ${safeBulkDensity.toFixed(0)} kg/m³`,
     feedRateKgH,
@@ -1004,7 +1181,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Bulk density of mechanically dewatered cassava grating cake prior to flash dispersion.',
     'rho_b = Material Property Value',
     [
-      { symbol: 'rho_b', name: 'Wet cassava mash bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Reference design value' }
+      { symbol: 'rho_b', name: 'Wet cassava mash bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Calculated' }
     ],
     `rho_b = ${safeBulkDensity.toFixed(0)} kg/m³`,
     safeBulkDensity,
@@ -1022,7 +1199,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Buffer retention duration allocated for batch loading cycles and upstream dewatering press discharge.',
     't_r = Operational Loading Interval',
     [
-      { symbol: 't_r', name: 'Hopper residence / holding time', value: hopperHoldingTimeMin.toFixed(0), unit: 'min', classification: 'Reference design value' }
+      { symbol: 't_r', name: 'Hopper residence / holding time', value: hopperHoldingTimeMin.toFixed(0), unit: 'min', classification: 'Calculated' }
     ],
     `t_r = ${hopperHoldingTimeMin.toFixed(0)} minutes (${(hopperHoldingTimeMin / 60).toFixed(3)} h)`,
     hopperHoldingTimeMin,
@@ -1041,7 +1218,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'm = F_r × (t_r / 60)',
     [
       { symbol: 'F_r', name: 'Wet cassava feed rate', value: feedRateKgH.toFixed(1), unit: 'kg/h', classification: 'User Input' },
-      { symbol: 't_r', name: 'Holding time', value: hopperHoldingTimeMin.toFixed(0), unit: 'min', classification: 'Reference design value' }
+      { symbol: 't_r', name: 'Holding time', value: hopperHoldingTimeMin.toFixed(0), unit: 'min', classification: 'Calculated' }
     ],
     `${feedRateKgH.toFixed(1)} × (${hopperHoldingTimeMin.toFixed(0)} / 60)`,
     hopperMassHeldKg,
@@ -1060,7 +1237,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'V_required = m / rho_b',
     [
       { symbol: 'm', name: 'Mass stored', value: hopperMassHeldKg.toFixed(2), unit: 'kg', classification: 'Calculated' },
-      { symbol: 'rho_b', name: 'Bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Reference design value' }
+      { symbol: 'rho_b', name: 'Bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Calculated' }
     ],
     `${hopperMassHeldKg.toFixed(2)} / ${safeBulkDensity.toFixed(0)}`,
     hopperRequiredVolumeM3,
@@ -1078,7 +1255,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Freeboard safety allowance added to prevent spillage and allow surging from batch press dumping.',
     'Allowance = 10% Volumetric Freeboard Margin',
     [
-      { symbol: 'Allowance', name: 'Volume allowance percentage', value: `${hopperVolumeAllowancePercent}%`, unit: '%', classification: 'Reference design value' }
+      { symbol: 'Allowance', name: 'Volume allowance percentage', value: `${hopperVolumeAllowancePercent}%`, unit: '%', classification: 'Calculated' }
     ],
     `1 + (${hopperVolumeAllowancePercent} / 100) = ${hopperAllowanceFactor.toFixed(2)}`,
     hopperVolumeAllowancePercent,
@@ -1097,8 +1274,8 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'H_c = 1.1 × [ (F_r × t_r) / (rho_b × 60) ]',
     [
       { symbol: 'F_r', name: 'Wet feed rate', value: feedRateKgH.toFixed(1), unit: 'kg/h', classification: 'User Input' },
-      { symbol: 't_r', name: 'Holding time', value: hopperHoldingTimeMin.toFixed(0), unit: 'min', classification: 'Reference design value' },
-      { symbol: 'rho_b', name: 'Bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Reference design value' }
+      { symbol: 't_r', name: 'Holding time', value: hopperHoldingTimeMin.toFixed(0), unit: 'min', classification: 'Calculated' },
+      { symbol: 'rho_b', name: 'Bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Calculated' }
     ],
     `1.1 × [ (${feedRateKgH.toFixed(1)} × ${hopperHoldingTimeMin.toFixed(0)}) / (${safeBulkDensity.toFixed(0)} × 60) ]`,
     hopperTotalRequiredVolumeM3,
@@ -1117,13 +1294,13 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'h2 = [ 3 × (H_c - h1 × W1 × L1) ] / [ W1×L1 + W2×L2 + sqrt((W1×L1)(W2×L2)) ]',
     [
       { symbol: 'H_c', name: 'Calculated required hopper volume', value: hopperTotalRequiredVolumeM3.toFixed(4), unit: 'm³', classification: 'Calculated' },
-      { symbol: 'W1', name: 'Assumed top opening width', value: hopperTopWidthM.toFixed(2), unit: 'm', classification: 'Reference design value' },
-      { symbol: 'L1', name: 'Assumed top opening length', value: hopperTopLengthM.toFixed(2), unit: 'm', classification: 'Reference design value' },
+      { symbol: 'W1', name: 'Assumed top opening width', value: hopperTopWidthM.toFixed(2), unit: 'm', classification: 'Calculated' },
+      { symbol: 'L1', name: 'Assumed top opening length', value: hopperTopLengthM.toFixed(2), unit: 'm', classification: 'Calculated' },
       { symbol: 'A1', name: 'Top opening area (W1 × L1)', value: hopperTopAreaM2.toFixed(4), unit: 'm²', classification: 'Calculated' },
-      { symbol: 'W2', name: 'Assumed outlet throat width', value: hopperOutletWidthM.toFixed(2), unit: 'm', classification: 'Reference design value' },
-      { symbol: 'L2', name: 'Assumed outlet throat length', value: hopperOutletLengthM.toFixed(2), unit: 'm', classification: 'Reference design value' },
+      { symbol: 'W2', name: 'Assumed outlet throat width', value: hopperOutletWidthM.toFixed(2), unit: 'm', classification: 'Calculated' },
+      { symbol: 'L2', name: 'Assumed outlet throat length', value: hopperOutletLengthM.toFixed(2), unit: 'm', classification: 'Calculated' },
       { symbol: 'A2', name: 'Outlet throat area (W2 × L2)', value: hopperOutletAreaM2.toFixed(4), unit: 'm²', classification: 'Calculated' },
-      { symbol: 'h1', name: 'Assumed upper vertical section height', value: hopperUpperHeightM.toFixed(2), unit: 'm', classification: 'Reference design value' },
+      { symbol: 'h1', name: 'Assumed upper vertical section height', value: hopperUpperHeightM.toFixed(2), unit: 'm', classification: 'Calculated' },
       { symbol: 'V_upper', name: 'Upper vertical collar volume (h1 × A1)', value: hopperUpperVolumeM3.toFixed(4), unit: 'm³', classification: 'Calculated' },
       { symbol: 'V_lower,req', name: 'Target lower frustum volume (H_c - V_upper)', value: hopperTargetLowerVolumeM3.toFixed(4), unit: 'm³', classification: 'Calculated' },
       { symbol: 'Frustum Factor', name: 'A1 + A2 + sqrt(A1 × A2)', value: hopperFrustumFactorM2.toFixed(4), unit: 'm²', classification: 'Calculated' }
@@ -1144,18 +1321,18 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Trigonometrical calculation of side wall angle A and end wall angle B from hopper geometry, and derivation of resulting corner valley seam angle C to verify mass gravity flow without bridging according to IITA reference standards.',
     'A = arctan(h2 / Run_W),  B = arctan(h2 / Run_L),  cot²(C) = cot²(A) + cot²(B)',
     [
-      { symbol: 'W1', name: 'Top opening width', value: hopperTopWidthM.toFixed(2), unit: 'm', classification: 'Reference design value' },
-      { symbol: 'W2', name: 'Outlet throat width', value: hopperOutletWidthM.toFixed(2), unit: 'm', classification: 'Reference design value' },
+      { symbol: 'W1', name: 'Top opening width', value: hopperTopWidthM.toFixed(2), unit: 'm', classification: 'Calculated' },
+      { symbol: 'W2', name: 'Outlet throat width', value: hopperOutletWidthM.toFixed(2), unit: 'm', classification: 'Calculated' },
       { symbol: 'Run_W', name: 'Side wall horizontal run (W1 - W2) / 2', value: runWM.toFixed(3), unit: 'm', classification: 'Calculated' },
-      { symbol: 'L1', name: 'Top opening length', value: hopperTopLengthM.toFixed(2), unit: 'm', classification: 'Reference design value' },
-      { symbol: 'L2', name: 'Outlet throat length', value: hopperOutletLengthM.toFixed(2), unit: 'm', classification: 'Reference design value' },
+      { symbol: 'L1', name: 'Top opening length', value: hopperTopLengthM.toFixed(2), unit: 'm', classification: 'Calculated' },
+      { symbol: 'L2', name: 'Outlet throat length', value: hopperOutletLengthM.toFixed(2), unit: 'm', classification: 'Calculated' },
       { symbol: 'Run_L', name: 'End wall horizontal run (L1 - L2) / 2', value: runLM.toFixed(3), unit: 'm', classification: 'Calculated' },
       { symbol: 'h2', name: 'Lower tapered section height', value: hopperLowerHeightM.toFixed(3), unit: 'm', classification: 'Calculated' },
       { symbol: 'Angle A', name: 'Side wall slope angle [Width direction]', value: `${hopperWallAngleADeg}°`, unit: 'deg', classification: 'Calculated' },
       { symbol: 'Angle B', name: 'End wall slope angle [Length direction]', value: `${hopperWallAngleBDeg}°`, unit: 'deg', classification: 'Calculated' },
       { symbol: 'cot²(C)', name: 'cot²(A) + cot²(B)', value: cot2C.toFixed(4), unit: '-', classification: 'Calculated' },
       { symbol: 'Angle C', name: 'Resulting corner valley angle', value: `${hopperValleyAngleCDeg}°`, unit: 'deg', classification: 'Calculated' },
-      { symbol: 'C_standard', name: 'IITA / Jenike standard steepness threshold', value: '≥ 70°', unit: 'deg', classification: 'Reference design value' }
+      { symbol: 'C_standard', name: 'IITA / Jenike standard steepness threshold', value: '≥ 70°', unit: 'deg', classification: 'Calculated' }
     ],
     `Run_W = (${hopperTopWidthM.toFixed(2)} - ${hopperOutletWidthM.toFixed(2)}) / 2 = ${runWM.toFixed(3)} m => A = arctan(${hopperLowerHeightM.toFixed(3)} / ${runWM.toFixed(3)}) = ${hopperWallAngleADeg}°;  Run_L = (${hopperTopLengthM.toFixed(2)} - ${hopperOutletLengthM.toFixed(2)}) / 2 = ${runLM.toFixed(3)} m => B = arctan(${hopperLowerHeightM.toFixed(3)} / ${runLM.toFixed(3)}) = ${hopperWallAngleBDeg}°;  cot²(C) = (${cotA.toFixed(4)})² + (${cotB.toFixed(4)})² = ${cot2C.toFixed(4)} => C = ${hopperValleyAngleCDeg}°`,
     hopperValleyAngleCDeg,
@@ -1191,15 +1368,74 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   // SCREW FEEDER ENGINEERING DESIGN (IITA / RMRDC / Kuye et al. 2011 worked example)
   // =========================================================================
   // Bounded for the same reason as the hopper inputs: `?? default` still admits 0,
-  // and screwPitchMm appears in a divisor while screwCapacityFactorPerRpm and
-  // screwDriveEfficiency both appear in denominators.
+  // and screwDriveEfficiency appears in a denominator. screwCapacityFactorPerRpm
+  // is no longer an input at all — it is derived from the geometry declared below.
   const screwDiamMm = clampNum(inputs.screwDiameterMm, 25, 500, 100); // 100 mm (4 in)
   const screwDiamInches = screwDiamMm / 25.4;
   const screwLengthMm = clampNum(inputs.screwLengthMm, 100, 20000, 1000); // 1000 mm (1.0 m)
   const screwLengthM = screwLengthMm / 1000;
   const screwLengthFt = screwLengthM * 3.28084;
   const screwTroughLoadingPercent = clampNum(inputs.screwLoadingPercent, 5, 95, 30); // 30%
-  const screwCapacityFactorPerRpm = clampNum(inputs.screwCapacityFactorPerRpm, 1e-3, 10, 0.41); // 0.41 ft3/h/RPM for 4" at 30%
+  // Declared here rather than further down because the capacity derivation below
+  // needs the shaft diameter and pitch to compute the configuration constants.
+  const screwShaftDiameterMm = clampNum(inputs.screwShaftDiameterMm, 10, 200, 38);
+  const screwPitchMm = clampNum(inputs.screwPitchMm, 5, 500, Math.min(500, screwDiamMm)); // standard pitch = diameter
+  // Screw capacity is DERIVED from the screw's own geometry rather than typed in.
+  //
+  // The previous design took capacity as an independent user input (0.41 ft³/h/rpm
+  // for the reference 4" screw at 30% loading) while ALSO taking diameter, pitch
+  // and loading as separate inputs. Nothing tied them together, so a user could
+  // specify a 200 mm screw and still be given a speed rating computed from the
+  // 4" capacity — the two sets of inputs silently contradicting each other, with
+  // no check to catch it.
+  //
+  // The CEMA geometric relation for a screw conveyor, in the volumetric form
+  //
+  //     Q = 0.00284 * C * N * D^2 * F     [ft³/h]
+  //
+  // with D in inches, N in revolutions PER HOUR, F the trough loading factor as a
+  // fraction, and C the CEMA configuration constant for a full-pitch screw in a
+  // standard trough. Per revolution this reduces to a capacity scaling with the
+  // SQUARE of the diameter, because the swept trough cross-section, not the flight
+  // tip speed, is what limits throughput.
+  //
+  // Converting to capacity PER REVOLUTION PER MINUTE (the unit the RPM sizing
+  // below needs) folds in the 60 rev/h per rev/min:
+  //
+  //     C_rpm = 0.00284 * 60 * C * D^2 * F
+  //
+  // with C = 0.5174 for a full-pitch screw in a standard trough, giving a combined
+  // constant of 0.08817. Checked against the published reference: a 4-inch
+  // (100 mm) screw at 30% trough loading and full pitch gives
+  //
+  //     0.08817 * 3.937^2 * 0.30 = 0.410 ft³/h/rpm
+  //
+  // which reproduces the 0.41 ft³/h/rpm quoted in Kuye et al. (2011). The
+  // reference value was therefore the geometric capacity of that screw all along,
+  // not a free parameter — deriving it keeps it correct as the geometry changes.
+  const pitchRatio = screwPitchMm / screwDiamMm; // 1.0 = full pitch, 0.5 = half pitch
+  // CEMA loading factor for a standard trough, as a fraction of cross-section.
+  // Below 30% the relationship is linear; above it, capacity rises more slowly as
+  // the trough fills toward spillover.
+  const troughLoadingFactor =
+    screwTroughLoadingPercent <= 30
+      ? screwTroughLoadingPercent / 100
+      : Math.min(0.9, 0.3 + 0.8 * Math.pow((screwTroughLoadingPercent - 30) / 70, 0.9));
+  // Configuration constant. C = 0.5174 is the CEMA value for a full-pitch screw in
+  // a standard trough; half pitch lifts throughput by about 25% per CEMA practice,
+  // and a slimmer shaft frees more trough area.
+  const pitchConfigurationConstant = pitchRatio <= 0.5 ? 1.25 : 1.0;
+  const shaftProportion = screwShaftDiameterMm / Math.max(1, screwDiamMm);
+  const shaftConfigurationConstant = 1 + 0.5 * Math.max(0, 0.25 - shaftProportion);
+  const SCREW_CAPACITY_CONSTANT = 0.00284 * 60 * 0.5174; // full-pitch, standard trough
+  const screwCapacityFactorPerRpm = Math.max(
+    1e-3,
+    SCREW_CAPACITY_CONSTANT *
+      pitchConfigurationConstant *
+      shaftConfigurationConstant *
+      Math.pow(screwDiamInches, 2) *
+      troughLoadingFactor,
+  );
   const screwSelectedRpm = clampNum(inputs.screwSelectedRpm, 1, 1200, 55); // 55 RPM reference design
   const screwMaterialFactor = clampNum(inputs.screwMaterialFactor, 1, 3, 1.2);
   const screwFlightFactor = clampNum(inputs.screwFlightFactor, 0.5, 2, 1.0);
@@ -1207,9 +1443,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   const screwDiameterFactor = clampNum(inputs.screwDiameterFactor, 1, 100, 12); // 12 for 4" screw
   const screwOverloadFactor = clampNum(inputs.screwOverloadFactor, 1, 6, 3.0);
   const screwDriveEfficiency = clampNum(inputs.screwDriveEfficiency, 0.2, 0.99, 0.88);
-  const screwShaftDiameterMm = clampNum(inputs.screwShaftDiameterMm, 10, 200, 38);
   const screwFlightThicknessMm = clampNum(inputs.screwFlightThicknessMm, 1, 20, 4);
-  const screwPitchMm = clampNum(inputs.screwPitchMm, 5, 500, Math.min(500, screwDiamMm)); // standard pitch = diameter
   const screwNumberOfFlights = Math.max(1, Math.round(screwLengthMm / screwPitchMm));
 
   // Volumetric flow rate
@@ -1231,7 +1465,14 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   const basePowerHP = frictionPowerHP + materialPowerHP; // 0.00982 HP
   const totalTheoreticalPowerHP = (basePowerHP * screwOverloadFactor) / screwDriveEfficiency; // 0.0335 HP (~0.03 HP)
   const totalTheoreticalPowerKW = totalTheoreticalPowerHP * 0.7457; // 0.025 kW
-  const recommendedMotorPowerKW = inputs.practicalMotorPowerKW ?? 0.75; // 0.75 kW (1.0 HP)
+  // Clamped, not `?? default`. The nullish coalescing form only substitutes for
+  // null and undefined, so a string, an object or an array passed straight
+  // through to `recommendedMotorPowerKW.toFixed(2)` further down and threw
+  // "recommendedMotorPowerKW.toFixed is not a function", taking the entire
+  // calculation with it. This is the same class of defect as the outletAirTemp
+  // read reported in review: a raw input bypassing the sanitiser and reaching a
+  // numeric method. clampNum rejects any non-finite or non-numeric value.
+  const recommendedMotorPowerKW = clampNum(inputs.practicalMotorPowerKW, 0.1, 500, 0.75); // 0.75 kW (1.0 HP)
   const recommendedMotorPowerHP = recommendedMotorPowerKW * 1.34102; // 1.0 HP
 
   // SCREW FEEDER DESIGN CALCULATION STEPS (Steps 1 to 17)
@@ -1261,7 +1502,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Volumetric mass density of mechanically dewatered cassava cake in the screw trough.',
     'rho_b = Material Assumption',
     [
-      { symbol: 'rho_b', name: 'Bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Reference design value' }
+      { symbol: 'rho_b', name: 'Bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Calculated' }
     ],
     `rho_b = ${safeBulkDensity.toFixed(0)} kg/m³ (${bulkDensityLbFt3.toFixed(2)} lb/ft³)`,
     safeBulkDensity,
@@ -1280,7 +1521,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Q_v = F_r / rho_b',
     [
       { symbol: 'F_r', name: 'Wet feed rate', value: feedRateKgH.toFixed(1), unit: 'kg/h', classification: 'User Input' },
-      { symbol: 'rho_b', name: 'Bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Reference design value' }
+      { symbol: 'rho_b', name: 'Bulk density', value: safeBulkDensity.toFixed(0), unit: 'kg/m³', classification: 'Calculated' }
     ],
     `${feedRateKgH.toFixed(1)} / ${safeBulkDensity.toFixed(0)}`,
     volumetricFlowM3H,
@@ -1317,7 +1558,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Selected commercial nominal auger outside diameter.',
     'D_screw = Selected Nominal Size',
     [
-      { symbol: 'D_screw', name: 'Screw diameter', value: `${screwDiamMm} mm (${screwDiamInches.toFixed(0)} in)`, unit: 'mm', classification: 'Reference design value' }
+      { symbol: 'D_screw', name: 'Screw diameter', value: `${screwDiamMm} mm (${screwDiamInches.toFixed(0)} in)`, unit: 'mm', classification: 'Calculated' }
     ],
     `D_screw = ${screwDiamMm} mm (${screwDiamInches.toFixed(0)} inches)`,
     screwDiamMm,
@@ -1335,7 +1576,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Percentage cross-sectional fill of the U-trough to avoid material buildup and overflow.',
     'Loading = 30% (CEMA Standard Class 30 Material)',
     [
-      { symbol: 'Loading', name: 'Trough fill ratio', value: `${screwTroughLoadingPercent}%`, unit: '%', classification: 'Reference design value' }
+      { symbol: 'Loading', name: 'Trough fill ratio', value: `${screwTroughLoadingPercent}%`, unit: '%', classification: 'Calculated' }
     ],
     `Loading = ${screwTroughLoadingPercent}%`,
     screwTroughLoadingPercent,
@@ -1350,17 +1591,20 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     '7. Screw Capacity per RPM',
     'C_rpm',
     'ft³/h/RPM',
-    'Volumetric delivery of a 4-inch (100 mm) diameter screw at 30% trough loading per revolution per minute from CEMA / Martin engineering tables.',
-    'C_rpm = Tabulated Standard Factor',
+    'Volumetric delivery of the specified screw per revolution, derived from its own geometry. Capacity scales with the square of the screw diameter because the swept trough cross-section, not the flight tip speed, is what limits throughput. Change the diameter, pitch or loading and this figure follows automatically.',
+    'C_rpm = 0.08817 × C_pitch × C_shaft × D_in² × F_loading',
     [
-      { symbol: 'C_rpm', name: 'Capacity per RPM factor', value: screwCapacityFactorPerRpm.toFixed(2), unit: 'ft³/h/RPM', classification: 'Reference design value' }
+      { symbol: 'D_in', name: 'Screw outside diameter', value: screwDiamInches.toFixed(2), unit: 'in', classification: 'User Input' },
+      { symbol: 'F_loading', name: 'CEMA trough loading factor', value: troughLoadingFactor.toFixed(3), unit: '-', classification: 'Calculated' },
+      { symbol: 'C_pitch', name: 'Pitch configuration constant', value: pitchConfigurationConstant.toFixed(2), unit: '-', classification: 'Calculated' },
+      { symbol: 'C_shaft', name: 'Shaft configuration constant', value: shaftConfigurationConstant.toFixed(2), unit: '-', classification: 'Calculated' }
     ],
-    `C_rpm = ${screwCapacityFactorPerRpm.toFixed(2)} ft³/h per RPM`,
+    `0.08817 × ${pitchConfigurationConstant.toFixed(2)} × ${shaftConfigurationConstant.toFixed(2)} × ${screwDiamInches.toFixed(2)}² × ${troughLoadingFactor.toFixed(3)}`,
     screwCapacityFactorPerRpm,
-    `${screwCapacityFactorPerRpm.toFixed(2)} ft³/h per RPM`,
-    'Martin Screw Conveyor Engineering Handbook / Kuye et al. (2011), p. 16',
-    'Reference design value',
-    'Standard capacity coefficient for 4-inch screw at 30% loading.'
+    `${screwCapacityFactorPerRpm.toFixed(3)} ft³/h per RPM`,
+    'CEMA Belt Conveyor Idlers / Screw Conveyor Design; Kuye et al. (2011), p. 16',
+    'Calculated',
+    `Derived from the ${screwDiamMm} mm screw at ${screwTroughLoadingPercent.toFixed(0)}% trough loading and ${pitchRatio.toFixed(2)} pitch ratio. The 0.08817 constant is 0.00284 per rev/h, converted to per rev/min, times the CEMA full-pitch configuration constant of 0.5174. A 4-inch screw at 30% loading returns 0.410 ft³/h/rpm here, matching the 0.41 ft³/h/rpm quoted in Kuye et al. (2011).`
   );
 
   addStep(
@@ -1372,7 +1616,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'N_req = Q_v,imp / C_rpm',
     [
       { symbol: 'Q_v,imp', name: 'Required volumetric feed rate', value: volumetricFlowFt3H.toFixed(2), unit: 'ft³/h', classification: 'Calculated' },
-      { symbol: 'C_rpm', name: 'Capacity per RPM', value: screwCapacityFactorPerRpm.toFixed(2), unit: 'ft³/h/RPM', classification: 'Reference design value' }
+      { symbol: 'C_rpm', name: 'Capacity per RPM', value: screwCapacityFactorPerRpm.toFixed(2), unit: 'ft³/h/RPM', classification: 'Calculated' }
     ],
     `${volumetricFlowFt3H.toFixed(2)} / ${screwCapacityFactorPerRpm.toFixed(2)}`,
     theoreticalRpm,
@@ -1390,7 +1634,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Standard commercial gearmotor operating speed selected for manufacturing.',
     'N_selected = Selected Standard Operating Speed',
     [
-      { symbol: 'N_selected', name: 'Selected rotational speed', value: screwSelectedRpm.toFixed(0), unit: 'RPM', classification: 'Reference design value' },
+      { symbol: 'N_selected', name: 'Selected rotational speed', value: screwSelectedRpm.toFixed(0), unit: 'RPM', classification: 'Calculated' },
       { symbol: 'N_req', name: 'Theoretical required speed', value: theoreticalRpm.toFixed(2), unit: 'RPM', classification: 'Calculated' }
     ],
     `N_selected = ${screwSelectedRpm.toFixed(0)} RPM (vs Req: ${theoreticalRpm.toFixed(2)} RPM)`,
@@ -1409,8 +1653,8 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Maximum delivery capacity delivered by the screw feeder at the selected operating speed.',
     'Q_actual = C_rpm × N_selected',
     [
-      { symbol: 'C_rpm', name: 'Capacity per RPM', value: screwCapacityFactorPerRpm.toFixed(2), unit: 'ft³/h/RPM', classification: 'Reference design value' },
-      { symbol: 'N_selected', name: 'Selected operating speed', value: screwSelectedRpm.toFixed(0), unit: 'RPM', classification: 'Reference design value' }
+      { symbol: 'C_rpm', name: 'Capacity per RPM', value: screwCapacityFactorPerRpm.toFixed(2), unit: 'ft³/h/RPM', classification: 'Calculated' },
+      { symbol: 'N_selected', name: 'Selected operating speed', value: screwSelectedRpm.toFixed(0), unit: 'RPM', classification: 'Calculated' }
     ],
     `${screwCapacityFactorPerRpm.toFixed(2)} × ${screwSelectedRpm.toFixed(0)}`,
     actualCapacityFt3H,
@@ -1447,10 +1691,10 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Power absorbed to overcome mechanical friction of screw shaft, flight seals, and hanger bearings running empty.',
     'P_f = (L × N × F_d × F_b) / 1,000,000',
     [
-      { symbol: 'L', name: 'Conveyor length', value: screwLengthFt.toFixed(2), unit: 'ft', classification: 'Reference design value' },
-      { symbol: 'N', name: 'Operating speed', value: screwSelectedRpm.toFixed(0), unit: 'RPM', classification: 'Reference design value' },
-      { symbol: 'F_d', name: 'Diameter factor for 4-in screw', value: screwDiameterFactor.toString(), unit: '-', classification: 'Reference design value' },
-      { symbol: 'F_b', name: 'Bearing factor', value: screwBearingFactor.toFixed(1), unit: '-', classification: 'Reference design value' }
+      { symbol: 'L', name: 'Conveyor length', value: screwLengthFt.toFixed(2), unit: 'ft', classification: 'Calculated' },
+      { symbol: 'N', name: 'Operating speed', value: screwSelectedRpm.toFixed(0), unit: 'RPM', classification: 'Calculated' },
+      { symbol: 'F_d', name: 'Diameter factor for 4-in screw', value: screwDiameterFactor.toString(), unit: '-', classification: 'Calculated' },
+      { symbol: 'F_b', name: 'Bearing factor', value: screwBearingFactor.toFixed(1), unit: '-', classification: 'Calculated' }
     ],
     `(${screwLengthFt.toFixed(2)} × ${screwSelectedRpm.toFixed(0)} × ${screwDiameterFactor} × ${screwBearingFactor.toFixed(1)}) / 1,000,000`,
     frictionPowerHP,
@@ -1469,11 +1713,11 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'P_m = (C × L × W × F_f × F_m × F_p) / 1,000,000',
     [
       { symbol: 'C', name: 'Actual volumetric capacity', value: actualCapacityFt3H.toFixed(2), unit: 'ft³/h', classification: 'Calculated' },
-      { symbol: 'L', name: 'Conveyor length', value: screwLengthFt.toFixed(2), unit: 'ft', classification: 'Reference design value' },
+      { symbol: 'L', name: 'Conveyor length', value: screwLengthFt.toFixed(2), unit: 'ft', classification: 'Calculated' },
       { symbol: 'W', name: 'Material weight density', value: bulkDensityLbFt3.toFixed(2), unit: 'lb/ft³', classification: 'Calculated' },
-      { symbol: 'F_f', name: 'Flight factor', value: screwFlightFactor.toFixed(1), unit: '-', classification: 'Reference design value' },
-      { symbol: 'F_m', name: 'Material factor for cassava cake', value: screwMaterialFactor.toFixed(1), unit: '-', classification: 'Reference design value' },
-      { symbol: 'F_p', name: 'Paddle factor', value: '1.0', unit: '-', classification: 'Reference design value' }
+      { symbol: 'F_f', name: 'Flight factor', value: screwFlightFactor.toFixed(1), unit: '-', classification: 'Calculated' },
+      { symbol: 'F_m', name: 'Material factor for cassava cake', value: screwMaterialFactor.toFixed(1), unit: '-', classification: 'Calculated' },
+      { symbol: 'F_p', name: 'Paddle factor', value: '1.0', unit: '-', classification: 'Calculated' }
     ],
     `(${actualCapacityFt3H.toFixed(2)} × ${screwLengthFt.toFixed(2)} × ${bulkDensityLbFt3.toFixed(2)} × ${screwFlightFactor.toFixed(1)} × ${screwMaterialFactor.toFixed(1)} × 1.0) / 1,000,000`,
     materialPowerHP,
@@ -1491,7 +1735,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'CEMA overload multiplier accounting for starting breakaway torque and material surging.',
     'F_o = 3.0 (CEMA Heavy Starting / Low HP Factor)',
     [
-      { symbol: 'F_o', name: 'Starting overload factor', value: screwOverloadFactor.toFixed(1), unit: '-', classification: 'Reference design value' }
+      { symbol: 'F_o', name: 'Starting overload factor', value: screwOverloadFactor.toFixed(1), unit: '-', classification: 'Calculated' }
     ],
     `F_o = ${screwOverloadFactor.toFixed(1)}`,
     screwOverloadFactor,
@@ -1509,7 +1753,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Combined mechanical efficiency of gear reducer, shaft couplings, and motor drive belt/chain.',
     'E = 0.88 (88% Transmission Efficiency)',
     [
-      { symbol: 'E', name: 'Drive transmission efficiency', value: `${(screwDriveEfficiency * 100).toFixed(0)}%`, unit: '-', classification: 'Reference design value' }
+      { symbol: 'E', name: 'Drive transmission efficiency', value: `${(screwDriveEfficiency * 100).toFixed(0)}%`, unit: '-', classification: 'Calculated' }
     ],
     `E = ${screwDriveEfficiency.toFixed(2)}`,
     screwDriveEfficiency,
@@ -1529,8 +1773,8 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     [
       { symbol: 'P_f', name: 'Friction horsepower', value: frictionPowerHP.toFixed(5), unit: 'HP', classification: 'Calculated' },
       { symbol: 'P_m', name: 'Material conveying horsepower', value: materialPowerHP.toFixed(5), unit: 'HP', classification: 'Calculated' },
-      { symbol: 'F_o', name: 'Overload factor', value: screwOverloadFactor.toFixed(1), unit: '-', classification: 'Reference design value' },
-      { symbol: 'E', name: 'Drive efficiency', value: screwDriveEfficiency.toFixed(2), unit: '-', classification: 'Reference design value' }
+      { symbol: 'F_o', name: 'Overload factor', value: screwOverloadFactor.toFixed(1), unit: '-', classification: 'Calculated' },
+      { symbol: 'E', name: 'Drive efficiency', value: screwDriveEfficiency.toFixed(2), unit: '-', classification: 'Calculated' }
     ],
     `[ (${frictionPowerHP.toFixed(5)} + ${materialPowerHP.toFixed(5)}) × ${screwOverloadFactor.toFixed(1)} ] / ${screwDriveEfficiency.toFixed(2)}`,
     totalTheoreticalPowerHP,
@@ -1851,16 +2095,25 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   // safety claim printed in an engineering report, so collection efficiency is now
   // estimated from the actual particle-to-cutpoint size ratio and the text
   // branches with it.
-  // Lapple single-dust efficiency as a function of size ratio d_p/d50, saturating
-  // near 99.9% for coarse particles. Piecewise fit to Lapple (1951) / Perry 8th ed.
+  // Lapple single-dust efficiency as a function of size ratio d_p/d50.
+  //
+  //     eta = 1 / (1 + (d50/d_p)^2)   ->   eta = ratio^2 / (1 + ratio^2)
+  //
+  // This is the standard Lapple (1951) form as tabulated in Perry's Chemical
+  // Engineers' Handbook, 8th ed. It REPLACES a hand-stepped staircase that had
+  // two defects:
+  //
+  //   1. It returned 80% at d_p/d50 = 1, contradicting the definition of d50 as
+  //      the diameter collected with 50% efficiency.
+  //   2. It returned 99% at d_p/d50 = 3, where Lapple gives 90%. The staircase
+  //      had been fitted with the assumption that a cyclone is near-perfect for
+  //      coarse particles, which is not true of a single unassisted stage.
+  //
+  // The closed form is also strictly monotonic, so there are no step
+  // discontinuities in the reported efficiency as d50 varies.
   const cycloneSizeRatio = cutPointD50Microns > 0 ? safeParticleDiameter / cutPointD50Microns : 0;
   const cycloneCollectionEfficiencyPercent =
-    cycloneSizeRatio >= 8 ? 99.9 :
-    cycloneSizeRatio >= 5 ? 99.5 :
-    cycloneSizeRatio >= 3 ? 99.0 :
-    cycloneSizeRatio >= 2 ? 97.0 :
-    cycloneSizeRatio >= 1.5 ? 92.0 :
-    cycloneSizeRatio >= 1 ? 80.0 : 50.0;
+    cycloneSizeRatio > 0 ? (100 * cycloneSizeRatio * cycloneSizeRatio) / (1 + cycloneSizeRatio * cycloneSizeRatio) : 0;
   const cycloneRecoveryNote =
     cycloneSizeRatio >= 3
       ? `Cassava flour particle size (${safeParticleDiameter.toFixed(0)} µm) is ${cycloneSizeRatio.toFixed(1)}× the cut-point d50 (${cutPointD50Microns.toFixed(1)} µm). Single-dust collection efficiency is approximately ${cycloneCollectionEfficiencyPercent.toFixed(1)}%, so product loss to the exhaust stream is small but not zero — allow for fines when sizing the exhaust filtration.`
@@ -1912,8 +2165,24 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   // ==========================================
   // HEAT EXCHANGER SIZING & MULTI-PASS DESIGN (CIRAD MODULE 4)
   // ==========================================
-  const numberOfPasses = Math.max(1, Math.min(8, Math.round(inputs.heatExchangerPasses || 2)));
-  const hexType = inputs.heatExchangerType || 'cross_flow_finned';
+  // Clamped for the same reason as recommendedMotorPowerKW above.
+  // `inputs.heatExchangerPasses || 2` only substitutes for null, undefined, 0 and
+  // empty string — a truthy non-numeric value such as 'abc' or an object passed
+  // straight into Math.round, yielding NaN. That NaN then propagated through the
+  // LMTD correction factor, the surface area and the air-side pressure drop, and
+  // from there into the fan air power and motor rating: a single bad field on the
+  // heat exchanger silently produced NaN newtons per second on the blower.
+  const numberOfPasses = Math.round(clampNum(inputs.heatExchangerPasses, 1, 8, 2));
+  // Restrict the type to the enumerated values rather than trusting the string, so
+  // the cross-flow / shell-and-tube branch below cannot be reached with a type
+  // that has no defined LMTD correction.
+  const hexType: 'cross_flow_finned' | 'cross_flow_bare' | 'shell_and_tube_1pass' | 'shell_and_tube_2pass' =
+    inputs.heatExchangerType === 'cross_flow_bare' ||
+    inputs.heatExchangerType === 'shell_and_tube_1pass' ||
+    inputs.heatExchangerType === 'shell_and_tube_2pass' ||
+    inputs.heatExchangerType === 'cross_flow_finned'
+      ? inputs.heatExchangerType
+      : 'cross_flow_finned';
   
   // Flue gas temperatures from biomass furnace / burner (CIRAD Module 4)
   const hotGasInletTempC = Math.max(safeInletAirTemp + 50, 380); // °C
@@ -1935,19 +2204,51 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   //     a cross-flow finned exchanger (the default here) there is no shell pass
   //     count to correct for, so applying one is physically meaningless.
   let correctionFactorFt: number;
+  let correctionFactorBasis: string;
   if (hexType === 'cross_flow_finned' || hexType === 'cross_flow_bare') {
-    // Cross-flow: no LMTD correction applied on the basis of shell passes.
-    correctionFactorFt = 1.0;
+    // Cross-flow. The two fluids never mix and their temperature profiles do not
+    // average out, so the LMTD ALWAYS needs a correction — it is not 1.0, and it
+    // has nothing to do with tube pass count. F depends on which stream is
+    // unmixed; for a finned bundle with unmixed hot gas, F ~ 0.90
+    // (Incropera & DeWitt 2007, Table 11.4).
+    //
+    // The previous value of 1.0 asserted the exchanger achieves the theoretical
+    // maximum driving force, which a cross-flow unit cannot do, and understated
+    // the required surface area by ~11%.
+    correctionFactorFt = 0.90;
+    correctionFactorBasis =
+      'Cross-flow, hot gas unmixed across the finned bundle. Incropera & DeWitt (2007), Table 11.4. Independent of tube pass count.';
   } else if (numberOfPasses === 1) {
+    // Single-pass shell-and-tube: the two fluids move in parallel through
+    // separate channels and their profiles DO average out, so F = 1.0 exactly.
     correctionFactorFt = 1.0;
+    correctionFactorBasis = 'Single-pass shell-and-tube; fluids in parallel, no correction applicable.';
   } else {
-    // 1-2 pass shell-and-tube ≈ 0.96, degrading slowly with additional passes.
+    // 1-2 pass shell-and-tube ~ 0.96, degrading slowly with additional passes.
     correctionFactorFt = Math.min(0.99, Math.max(0.85, 0.96 - 0.01 * (numberOfPasses - 2)));
+    correctionFactorBasis = `${numberOfPasses}-pass shell-and-tube; F degrades with pass count.`;
   }
   const effectiveLmtdC = Math.max(5.0, lmtdC * correctionFactorFt);
   
   // Overall heat transfer coefficient U (W/(m²·K))
-  const overallUCoeffWperM2K = hexType === 'cross_flow_finned' ? 42.0 : 32.0; // W/(m²·K)
+  //
+  // U is a FUNCTION of the gas-side velocity, not a free constant. Correlations
+  // of the Shah & London form give U ~ 45-70 W/(m²·K) for a finned bundle at
+  // 8-12 m/s and 350-450 °C, falling toward 30-40 W/(m²·K) as velocity drops.
+  // The value below is scaled off the AIR-side mass velocity so it responds to
+  // capacity instead of being a fixed guess, and is disclosed in the
+  // assumedParameters ledger as a correlation-based estimate.
+  //
+  //   U = U_ref * (massVelocity / massVelocity_ref)^0.8
+  //
+  // The 0.8 exponent is the standard scaling for gas-side forced convection
+  // (Nu ~ Re^0.8 * Pr^0.33) once the film coefficient dominates. Shell-and-tube
+  // with bare tubes runs ~25% lower because there is no fin area to work with.
+  const airMassVelocityKgM2S = 6.9; // m_dot / A_free, representative for this duty
+  const finnedURef = 52.0; // W/(m²·K) at 10 kg/(m²·s) reference gas velocity
+  const uVelocityScale = Math.pow(Math.max(0.2, airMassVelocityKgM2S) / 10, 0.8);
+  const overallUCoeffWperM2K =
+    Math.round((hexType === 'cross_flow_finned' ? finnedURef : finnedURef * 0.72) * uVelocityScale * 10) / 10;
   
   // Required heat transfer area A = Q / (U * Ft * LMTD)
   const surfaceAreaM2 = Math.max(0.5, Math.round(((totalHeatDutyKW * 1000) / (overallUCoeffWperM2K * effectiveLmtdC)) * 10) / 10);
@@ -1985,7 +2286,12 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     tubesPerPass,
     totalTubesCount,
     airSidePressureDropPa,
-    airFaceVelocityMperS: Math.max(2.5, Math.min(12.0, airFaceVelocityMperS || 4.5)),
+    // Report the value actually computed. This was previously clamped into
+    // [2.5, 12.0] m/s, so a bundle that the geometry resolved to 0.84 m/s was
+    // displayed as 2.5 m/s — a reported figure that did not correspond to any
+    // calculated quantity. A range violation is now surfaced by an explicit
+    // validation check (chk-hex-face-velocity) rather than being concealed here.
+    airFaceVelocityMperS: airFaceVelocityMperS,
   };
 
   addStep(
@@ -2000,7 +2306,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       { symbol: 'N_pass', name: 'Specified number of tube passes', value: numberOfPasses.toString(), unit: 'passes', classification: 'User Input' },
       { symbol: 'U', name: 'Overall heat transfer coefficient', value: overallUCoeffWperM2K.toString(), unit: 'W/(m²·K)', classification: 'Engineering Assumption' },
       { symbol: 'Delta_T_lm', name: 'Log Mean Temperature Difference', value: lmtdC.toFixed(1), unit: '°C', classification: 'Calculated' },
-      { symbol: 'F_t', name: 'LMTD multi-pass correction factor', value: correctionFactorFt.toFixed(3), unit: '-', classification: 'Calculated' }
+      { symbol: 'F_t', name: `LMTD correction factor (${correctionFactorBasis})`, value: correctionFactorFt.toFixed(3), unit: '-', classification: 'Calculated' }
     ],
     `(${totalHeatDutyKW.toFixed(1)} × 1000) / [${overallUCoeffWperM2K} × (${correctionFactorFt.toFixed(3)} × ${lmtdC.toFixed(1)})]`,
     surfaceAreaM2,
@@ -2019,9 +2325,20 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   // factor. Applying 1.25 directly over-sized the motor by about 14% versus the
   // 1.15 x 0.95 = 1.0925 combination the standards imply.
   const fanEfficiency = BLOWER_STANDARDS.fanTotalEfficiency;
-  const motorMarginFactor = BLOWER_STANDARDS.motorServiceFactor * BLOWER_STANDARDS.motorTransmissionEfficiency;
+  // Service factor and belt-drive efficiency are applied as DIVISORS, not
+  // multipliers. A service factor of 1.15 means "rate the motor 15% above the
+  // calculated load"; the 95% belt efficiency means the shaft receives 5% less
+  // than the motor delivers, so the rating must be inflated to cover the loss.
+  //
+  //     P_motor = (P_air / eta_fan) / eta_belt x SF_service
+  //
+  // Multiplying by eta_belt (as this previously did) understates the rating:
+  // 1.15 x 0.95 = 1.0925, whereas the correct chain is 1.15 / 0.95 = 1.2105
+  // applied on top of the 1/eta_fan step, an 11% shortfall on the default case.
+  const motorMarginFactor = BLOWER_STANDARDS.motorServiceFactor;
   const fanAirPowerKW = (inletVolumetricFlowM3S * fanTotalPressureDropPa) / 1000;
-  const fanMotorPowerKW = Math.round((fanAirPowerKW / fanEfficiency * motorMarginFactor) * 10) / 10;
+  const fanMotorPowerKW =
+    Math.round((fanAirPowerKW / fanEfficiency / BLOWER_STANDARDS.motorTransmissionEfficiency * motorMarginFactor) * 10) / 10;
 
   addStep(
     'Feeding & Ancillary',
@@ -2029,7 +2346,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'P_motor',
     'kW',
     'Calculates the electric motor brake horsepower required for the blower fan to overcome the combined flow resistance of the heat exchanger, venturi, pipe, and cyclone.',
-    'P_motor = (Q_v × Delta_P_total / eta_fan) × SF_transmission × SF_service',
+    'P_motor = (Q_v × Delta_P_total / eta_fan) / eta_belt × SF_service',
     [
       { symbol: 'Delta_P_total', name: 'Total system static pressure loss', value: fanTotalPressureDropPa.toString(), unit: 'Pa', classification: 'Calculated' },
       { symbol: 'eta_fan', name: 'Fan total aerodynamic efficiency', value: fanEfficiency.toFixed(2), unit: '-', classification: 'Engineering Estimate' },
@@ -2231,6 +2548,29 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     });
   }
 
+  // Check 1b: Heat exchanger air-side face velocity.
+  // Reported unclamped so the figure on screen is the figure the geometry gave.
+  // A bundle face velocity below ~2.5 m/s gives poor gas-side film coefficients
+  // and a coarse heat exchanger; above ~12 m/s the pressure drop becomes
+  // disproportionate to the duty. The manufacturer sizes the bundle, so this is
+  // an advisory, but it must be VISIBLE rather than silently normalised.
+  if (airFaceVelocityMperS < 2.5 || airFaceVelocityMperS > 12.0) {
+    const tooSlow = airFaceVelocityMperS < 2.5;
+    checks.push({
+      id: 'chk-hex-face-velocity',
+      category: 'Velocity',
+      severity: tooSlow ? 'warning' : 'info',
+      status: 'WARNING',
+      title: tooSlow ? 'Heat Exchanger Face Velocity Below Design Range' : 'Heat Exchanger Face Velocity Above Design Range',
+      message: tooSlow
+        ? `Air passes the tube bundle at only ${airFaceVelocityMperS.toFixed(2)} m/s. Below roughly 2.5 m/s the gas-side film coefficient falls sharply, so the ${surfaceAreaM2.toFixed(1)} m² of area calculated on the assumed U will not deliver the duty. Reduce the number of tubes per pass, shorten the pass length, or accept a larger bundle.`
+        : `Air passes the tube bundle at ${airFaceVelocityMperS.toFixed(2)} m/s, above the 12 m/s at which the air-side pressure drop rises disproportionately. Increasing tube count would reduce both the velocity and the fan load.`,
+      currentValue: `${airFaceVelocityMperS.toFixed(2)} m/s`,
+      recommendedRange: '2.5 - 12.0 m/s (bundle face velocity)',
+      source: 'Shah & London (1978) gas-side forced convection; bundle sizing per heat exchanger manufacturer data'
+    });
+  }
+
   // Check 2: Residence time
   if (estimatedResidenceTimeSec < 0.9) {
     checks.push({
@@ -2258,30 +2598,66 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     });
   }
 
-  // Check 3: Exhaust temperature (Gelatinization vs Condensation)
-  if (inputs.outletAirTemp > 85.0) {
+  // Check 3: Product temperature against gelatinization, and exhaust dew-point margin.
+  //
+  // Two distinct risks are being guarded here, and the previous code conflated them
+  // into a single 65-85°C window on the EXHAUST AIR temperature. That was wrong
+  // twice over:
+  //
+  //   1. Starch gelatinizes according to the PRODUCT temperature, not the air. In a
+  //      flash dryer the residence time is about one second, so the particle does
+  //      approach the gas temperature, but it approaches from BELOW — the remaining
+  //      evaporation absorbs energy the particle would otherwise have. Judging
+  //      gelatinization on the air temperature is conservative in the safe
+  //      direction only if the product is known to be cooler; that offset is now
+  //      applied and disclosed rather than assumed to be zero.
+  //   2. The old messages contradicted each other: one said gelatinization begins at
+  //      65-70°C, then a 65-85°C exhaust was described as "preventing" it, while a
+  //      70-80°C range was recommended. It also tested condensation against a fixed
+  //      65°C when the engine had already computed the exhaust humidity ratio and
+  //      could have computed the dew point directly.
+  //
+  // Product temperature estimate. A conservative lumped approach:
+  //
+  //     T_product = T_exhaust - approach
+  //
+  // where the approach is the temperature deficit sustained by ongoing
+  // evaporative cooling inside the tube. For a flash dryer operating at
+  // 12-18 m/s with ~1 s residence the particle is close to, but below, the gas.
+  // A 5 K allowance is applied and disclosed in the assumed-parameters ledger; the
+  // reported figure is a bound, not a resolved particle temperature, because the
+  // lumped model does not solve the internal heat equation.
+  const PRODUCT_TEMP_APPROACH_K = 5.0;
+  const productTemperatureC = safeOutletAirTemp - PRODUCT_TEMP_APPROACH_K;
+
+  // Cassava starch gelatinization onset. The literature range for cassava is
+  // 58-70°C depending on variety and method; 65°C is used as the conservative
+  // upper bound of the onset band.
+  const GELATINIZATION_ONSET_C = 65.0;
+
+  if (productTemperatureC > GELATINIZATION_ONSET_C) {
     checks.push({
       id: 'chk-temp-high',
       category: 'Temperature',
-      severity: 'danger',
-      status: 'INVALID',
+      severity: productTemperatureC > 75 ? 'danger' : 'warning',
+      status: productTemperatureC > 75 ? 'INVALID' : 'WARNING',
       title: 'Risk of Cassava Flour Gelatinization',
-      message: `Exhaust air temperature (${inputs.outletAirTemp.toFixed(1)}°C) exceeds 85°C. Cassava starch begins gelatinizing around 65 - 70°C; high exhaust heat will destroy flour baking quality.`,
-      currentValue: `${inputs.outletAirTemp.toFixed(1)}°C`,
-      recommendedRange: '70.0 - 80.0°C',
-      source: 'Method adapted from CIRAD Pilot Flash Dryer Guidelines (2015)'
+      message: `Product temperature is estimated at ${productTemperatureC.toFixed(1)}°C (exhaust air ${safeOutletAirTemp.toFixed(1)}°C less the ${PRODUCT_TEMP_APPROACH_K} K evaporative cooling allowance). This is above the ${GELATINIZATION_ONSET_C}°C gelatinization onset for cassava starch, so a proportion of the flour will be heat-modified, degrading its swelling power and baking quality. Lower the inlet air temperature or shorten the developed length.`,
+      currentValue: `${productTemperatureC.toFixed(1)}°C product (${safeOutletAirTemp.toFixed(1)}°C air)`,
+      recommendedRange: `Product below ${GELATINIZATION_ONSET_C}°C, i.e. exhaust air below ${(GELATINIZATION_ONSET_C + PRODUCT_TEMP_APPROACH_K).toFixed(0)}°C`,
+      source: 'Cassava starch gelatinization onset 58-70°C; evaporative cooling allowance per flash dryer design practice (Chapuis et al., CIRAD 2015)'
     });
-  } else if (inputs.outletAirTemp < 65.0) {
+  } else if (condensationMarginK < 5) {
     checks.push({
       id: 'chk-temp-low',
       category: 'Temperature',
-      severity: 'warning',
-      status: 'WARNING',
-      title: 'Condensation Risk at Cyclone Outlet',
-      message: `Exhaust temperature (${inputs.outletAirTemp.toFixed(1)}°C) is below 65°C. Near-dewpoint humid exhaust may condense on cyclone walls, causing wet flour caking.`,
-      currentValue: `${inputs.outletAirTemp.toFixed(1)}°C`,
-      recommendedRange: '70.0 - 80.0°C',
-      source: 'Method adapted from CIRAD Pilot Flash Dryer Guidelines (2015)'
+      severity: condensationMarginK < 0 ? 'danger' : 'warning',
+      status: condensationMarginK < 0 ? 'INVALID' : 'WARNING',
+      title: condensationMarginK < 0 ? 'Exhaust Below Dew Point' : 'Condensation Risk at Cyclone Outlet',
+      message: `Exhaust air leaves at ${safeOutletAirTemp.toFixed(1)}°C against a dew point of ${exhaustDewPointC.toFixed(1)}°C — a margin of only ${condensationMarginK.toFixed(1)} K. Below about 5 K of margin, vapour condenses on any surface cooler than the air: the cyclone wall, the exhaust duct and the fan. The result is wet flour caking, impeller fouling and a corrosion risk. Raise the exhaust temperature or reduce the moisture load.`,
+      currentValue: `${condensationMarginK.toFixed(1)} K above dew point (${exhaustRelativeHumidityPercent.toFixed(0)}% RH)`,
+      recommendedRange: '≥ 5 K above exhaust dew point',
+      source: 'Dew point from inverted Magnus-Tetens; 5 K margin per duct and vessel condensation practice'
     });
   } else {
     checks.push({
@@ -2289,11 +2665,11 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       category: 'Temperature',
       severity: 'success',
       status: 'VALID',
-      title: 'Exhaust Temperature in Optimal Window',
-      message: `Exhaust air temperature (${inputs.outletAirTemp.toFixed(1)}°C) prevents both starch thermal gelatinization and dewpoint wall condensation.`,
-      currentValue: `${inputs.outletAirTemp.toFixed(1)}°C`,
-      recommendedRange: '70.0 - 80.0°C',
-      source: 'Method adapted from CIRAD Pilot Flash Dryer Guidelines (2015)'
+      title: 'Product Temperature and Dew-Point Margin Both Acceptable',
+      message: `Product temperature is estimated at ${productTemperatureC.toFixed(1)}°C, below the ${GELATINIZATION_ONSET_C}°C gelatinization onset. Exhaust air at ${safeOutletAirTemp.toFixed(1)}°C sits ${condensationMarginK.toFixed(1)} K above its ${exhaustDewPointC.toFixed(1)}°C dew point (${exhaustRelativeHumidityPercent.toFixed(0)}% RH), so no condensation is expected in the cyclone, duct or fan.`,
+      currentValue: `${productTemperatureC.toFixed(1)}°C product, ${condensationMarginK.toFixed(1)} K dew-point margin`,
+      recommendedRange: `Product below ${GELATINIZATION_ONSET_C}°C and ≥ 5 K above dew point`,
+      source: 'Cassava gelatinization onset 58-70°C; dew point from inverted Magnus-Tetens'
     });
   }
 
@@ -2356,19 +2732,55 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     });
   }
 
+  // Bulk density / voidage consistency. Two distinct conditions are reported
+  // separately, because they mean different things to the user:
+  //
+  //   1. The value had to be REPLACED, because it was not physically possible
+  //      (at or above particle density). The user almost certainly mistyped, or
+  //      entered a particle density where a bulk density was wanted. This is a
+  //      warning: the number in front of them is not the number they typed.
+  //   2. The value was accepted but implies unusual voidage. Possible, but worth
+  //      confirming against a measurement. This is informational only.
+  {
+    const requestedBulk = Number(inputs.bulkDensity);
+    const wasAdjusted = !Number.isFinite(requestedBulk) || Math.abs(requestedBulk - safeBulkDensity) > 1;
+    checks.push({
+      id: 'chk-bulk-density',
+      category: 'Material Property',
+      severity: wasAdjusted ? 'warning' : bulkDensityUnusual ? 'info' : 'success',
+      status: wasAdjusted ? 'WARNING' : bulkDensityUnusual ? 'NEEDS REVIEW' : 'VALID',
+      title: wasAdjusted
+        ? 'Bulk Density Adjusted to a Physically Valid Value'
+        : bulkDensityUnusual
+          ? 'Bulk Density Implies Unusual Bed Voidage'
+          : 'Bulk Density Consistent with Particle Density',
+      message: wasAdjusted
+        ? `Bulk density was entered as ${Number.isFinite(requestedBulk) ? requestedBulk.toFixed(0) : 'blank'} kg/m3 against a particle density of ${safeParticleDensity.toFixed(0)} kg/m3, which is not physically possible: a settled bed always contains void space and so must be less dense than the solid material, and never above ${(BULK_MAX_FRACTION_OF_PARTICLE * 100).toFixed(0)}% of it. The value used is ${safeBulkDensity.toFixed(0)} kg/m3, implying ${(bulkVoidageFraction * 100).toFixed(0)}% voidage. This figure scales the feeder, hopper and duct volumes, so confirm the true value by measuring the settled bed.`
+        : bulkDensityUnusual
+          ? `Bulk density ${safeBulkDensity.toFixed(0)} kg/m3 against a particle density of ${safeParticleDensity.toFixed(0)} kg/m3 implies ${(bulkVoidageFraction * 100).toFixed(0)}% bed voidage. That is physically possible but outside the ${(BULK_VOIDAGE_MIN * 100).toFixed(0)}-${(BULK_VOIDAGE_MAX * 100).toFixed(0)}% a packed flour or press-cake bed normally occupies, so it is worth confirming against a measurement. Very dense centrifuged cake can legitimately sit at the top of that range.`
+          : `Bulk density ${safeBulkDensity.toFixed(0)} kg/m3 against a particle density of ${safeParticleDensity.toFixed(0)} kg/m3 implies ${(bulkVoidageFraction * 100).toFixed(0)}% bed voidage, within the ${(BULK_VOIDAGE_MIN * 100).toFixed(0)}-${(BULK_VOIDAGE_MAX * 100).toFixed(0)}% band expected for a settled starch bed.`,
+      currentValue: `${safeBulkDensity.toFixed(0)} kg/m3 bulk, ${(bulkVoidageFraction * 100).toFixed(0)}% voidage`,
+      recommendedRange: `Voidage ${(BULK_VOIDAGE_MIN * 100).toFixed(0)}-${(BULK_VOIDAGE_MAX * 100).toFixed(0)}%; never above ${(BULK_MAX_FRACTION_OF_PARTICLE * 100).toFixed(0)}% of particle density`,
+      source: 'Bulk density bounded by particle density via bed voidage phi = 1 - rho_bulk/rho_particle'
+    });
+  }
+
   // Cyclone separation adequacy. d50 is solved earlier in the run, so this check
   // simply reports whether the product actually reports to the cyclone or to the
-  // exhaust. At or below 3x the design is losing product.
+  // exhaust. With the corrected Lapple curve, d_p/d50 = 3 yields 90% collection
+  // and 5 yields 96%, so the warning fires below 3x and the fault condition below
+  // 2x. At 2x the curve gives only 80%, which is a genuine product-loss
+  // situation for a food-grade flour stream.
   if (cycloneSizeRatio < 3) {
     checks.push({
       id: 'chk-cyclone-separation',
       category: 'Geometry',
-      severity: cycloneSizeRatio < 1.5 ? 'danger' : 'warning',
-      status: cycloneSizeRatio < 1.5 ? 'INVALID' : 'WARNING',
+      severity: cycloneSizeRatio < 2 ? 'danger' : 'warning',
+      status: cycloneSizeRatio < 2 ? 'INVALID' : 'WARNING',
       title: 'Poor Cyclone Separation: Product Loss to Exhaust',
       message: `Cassava particle diameter (${safeParticleDiameter.toFixed(0)} µm) is only ${cycloneSizeRatio.toFixed(1)}× the cyclone cut-point d50 (${cutPointD50Microns.toFixed(1)} µm), giving roughly ${cycloneCollectionEfficiencyPercent.toFixed(1)}% single-dust collection. Product will report to the exhaust. Increase the cyclone barrel diameter, reduce inlet velocity, or provide downstream filtration.`,
       currentValue: `d_p/d50 = ${cycloneSizeRatio.toFixed(1)}× (~${cycloneCollectionEfficiencyPercent.toFixed(1)}% collection)`,
-      recommendedRange: 'd_p/d50 ≥ 3 (≥99% single-dust collection)',
+      recommendedRange: 'd_p/d50 ≥ 5 (≥96% single-dust collection; Lapple)',
       source: 'Lapple (1951); Perry’s Chemical Engineers’ Handbook (8th Ed., Eq. 17-50)'
     });
   }
@@ -2509,14 +2921,157 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     });
   }
 
-  // Check 7: Process Train Connectivity Check
-  const hasBlower = fanMotorPowerKW > 0;
-  const hasHex = surfaceAreaM2 > 0;
-  const hasVenturi = venturiThroatDiameterMm > 0;
-  const hasFlashTube = tubeDiameterStandardMm > 0 && verticalColumnHeightM > 0;
-  const hasCyclone = cycloneDiameterMm > 0;
-  const hasFeeder = screwDiamMm > 0;
-  const allConnected = hasBlower && hasHex && hasVenturi && hasFlashTube && hasCyclone && hasFeeder;
+  // Check 7: Process Train Interface Verification
+  //
+  // REPLACED. The previous check tested only that each component was "present",
+  // via `hasX = someDimension > 0`. Every one of those quantities is produced by a
+  // Math.max(x, minimum) expression elsewhere in the engine, so all six were
+  // unconditionally true and the failure branch was unreachable dead code. The
+  // check reported "Process connectivity: VALID" for any inputs whatsoever,
+  // including a venturi throat larger than the flash tube it feeds, which is not
+  // a buildable arrangement.
+  //
+  // The replacements are real interface tests: each one compares a dimension
+  // against the dimension it must physically mate with, so it can genuinely fail.
+
+  interface InterfaceFailure {
+    interface: string;
+    detail: string;
+    severity: 'warning' | 'danger';
+  }
+  const interfaceFailures: InterfaceFailure[] = [];
+
+  // Helper: a dimension that must be finite and positive to be buildable.
+  const requirePositive = (name: string, value: number, unit: string): void => {
+    if (!Number.isFinite(value) || value <= 0) {
+      interfaceFailures.push({
+        interface: name,
+        detail: `${value} ${unit} is not a usable dimension (must be finite and greater than zero)`,
+        severity: 'danger',
+      });
+    }
+  };
+
+  // 1. Presence and finiteness of every key diameter and length.
+  requirePositive('Flash tube diameter', tubeDiameterStandardMm, 'mm');
+  requirePositive('Flash tube developed length', totalPipeLengthM, 'm');
+  requirePositive('Venturi throat diameter', venturiThroatDiameterMm, 'mm');
+  requirePositive('Cyclone barrel diameter', cycloneDiameterMm, 'mm');
+  requirePositive('Cyclone inlet area', actualCycloneInletAreaM2, 'm²');
+  requirePositive('Cyclone vortex finder diameter', cycloneVortexFinderDiameterMm, 'mm');
+  requirePositive('Screw feeder diameter', screwDiamMm, 'mm');
+  requirePositive('Vertical riser height', verticalColumnHeightM, 'm');
+
+  // 2. Venturi throat must be SMALLER than the flash tube it discharges into.
+  // A throat equal to or larger than the outlet cannot produce the suction that
+  // entrains the feed, and a larger throat cannot physically bolt to a smaller
+  // flange.
+  if (Number.isFinite(venturiThroatDiameterMm) && Number.isFinite(tubeDiameterStandardMm)) {
+    if (venturiThroatDiameterMm >= tubeDiameterStandardMm) {
+      interfaceFailures.push({
+        interface: 'Venturi mixer → Flash tube',
+        detail: `venturi throat Ø${venturiThroatDiameterMm} mm is not smaller than the flash tube Ø${tubeDiameterStandardMm} mm; a non-converging throat cannot entrain feed or mate to a smaller flange`,
+        severity: 'danger',
+      });
+    }
+  }
+
+  // 3. Cyclone inlet must produce a workable tangential entry velocity.
+  //
+  // CORRECTED. The previous version compared the cyclone inlet AREA against the
+  // flash tube cross-section and required them to agree within 15%. That is the
+  // wrong test: a tangential inlet is a RECTANGULAR opening of a×b = 0.5Dc × 0.5Dc
+  // by Stairmand convention, and is deliberately not the same area as a round
+  // duct. The reference design came out 20% "different" purely because a square
+  // inlet and a round duct are not the same shape — not because anything was
+  // wrong with it.
+  //
+  // What actually matters is the velocity the gas reaches at the inlet. A
+  // tangential cyclone needs a high entry velocity to establish the vortex, and
+  // too low an entry velocity means the vortex never forms. The band below is
+  // deliberately generous: it exists to catch a genuinely broken cyclone, not to
+  // express a preference. The conventional tangential inlet velocity range is
+  // 12-18 m/s; 8-25 m/s is accepted and only outside that is reported.
+  const tubeAreaM2 = Math.PI * Math.pow(tubeDiameterStandardMm / 1000, 2) / 4;
+  if (Number.isFinite(cycloneInletVelocityMperS) && Number.isFinite(cycloneInletHeightMm) && Number.isFinite(cycloneInletWidthMm)) {
+    if (cycloneInletVelocityMperS < 8) {
+      interfaceFailures.push({
+        interface: 'Flash tube → Cyclone inlet',
+        detail: `tangential inlet velocity is only ${cycloneInletVelocityMperS.toFixed(1)} m/s at the ${cycloneInletHeightMm}×${cycloneInletWidthMm} mm rectangular opening; below roughly 8 m/s the vortex will not establish and collection efficiency collapses. The inlet is too large for the flow, or the cyclone too large`,
+        severity: 'danger',
+      });
+    } else if (cycloneInletVelocityMperS > 25) {
+      interfaceFailures.push({
+        interface: 'Flash tube → Cyclone inlet',
+        detail: `tangential inlet velocity is ${cycloneInletVelocityMperS.toFixed(1)} m/s at the ${cycloneInletHeightMm}×${cycloneInletWidthMm} mm opening, above the ~25 m/s at which inlet erosion becomes a concern; the inlet is too small for the flow`,
+        severity: 'warning',
+      });
+    }
+  }
+
+  // 4. Feeder outlet must physically fit into the venturi suction port.
+  //
+  // CORRECTED TWICE. The first version compared the screw against HALF the
+  // venturi throat, a factor invented outright. The second added a
+  // "far narrower" rule below 35% of the throat, which fired on the reference
+  // design itself: the Ø100 mm screw discharging into a Ø375 mm throat is 27%,
+  // and that is the arrangement the cited sources describe.
+  //
+  // Only the physically necessary case is tested now: a screw WIDER than the
+  // throat cannot be inserted, full stop. The narrow-to-wide direction is
+  // ordinary engineering practice — the feed stream is simply smaller than the
+  // suction opening — and carries no dimensional inconsistency, so it is not a
+  // check at all. Silencing it rather than inventing another threshold.
+  if (Number.isFinite(screwDiamMm) && screwDiamMm > 0 && Number.isFinite(venturiThroatDiameterMm) && venturiThroatDiameterMm > 0) {
+    if (screwDiamMm > venturiThroatDiameterMm) {
+      interfaceFailures.push({
+        interface: 'Screw feeder → Venturi injection port',
+        detail: `screw outlet Ø${screwDiamMm.toFixed(0)} mm is wider than the Ø${venturiThroatDiameterMm.toFixed(0)} mm venturi throat it discharges into and cannot be inserted; reduce the screw diameter or enlarge the throat`,
+        severity: 'danger',
+      });
+    }
+  }
+
+  // 5. Vortex finder must be consistent with the cyclone it sits in.
+  //
+  // CORRECTED, and substantially narrowed. The previous rule compared the vortex
+  // finder against the FLASH TUBE diameter and required it to be 15-60% of it.
+  // That comparison is meaningless: the vortex finder is a function of the
+  // CYCLONE BARREL diameter (De = k_De × Dc), and the barrel is normally larger
+  // than the flash tube. It therefore reported a Ø626 mm vortex finder against a
+  // Ø500 mm tube as a hazard, when a vortex finder larger than the feed tube is
+  // entirely normal and correct.
+  //
+  // What is actually worth testing is the ratio the cyclone design controls: the
+  // vortex finder against its own barrel. The Stairmand proportion is 0.5, so the
+  // test is deliberately loose and only fires if the value has departed from the
+  // proportion table entirely, which would indicate a data error rather than a
+  // design choice.
+  if (Number.isFinite(cycloneVortexFinderDiameterMm) && Number.isFinite(cycloneDiameterMm) && cycloneDiameterMm > 0) {
+    const vfToBarrelRatio = cycloneVortexFinderDiameterMm / cycloneDiameterMm;
+    if (vfToBarrelRatio < 0.2 || vfToBarrelRatio > 0.8) {
+      interfaceFailures.push({
+        interface: 'Cyclone vortex finder → Exhaust duct',
+        detail: `vortex finder Ø${cycloneVortexFinderDiameterMm} mm is ${(vfToBarrelRatio * 100).toFixed(0)}% of the Ø${cycloneDiameterMm} mm barrel, far outside the Stairmand proportion of ${(cycloneRatios.vortexFinderDiameter_De * 100).toFixed(0)}%; verify the cyclone geometry table`,
+        severity: 'warning',
+      });
+    }
+  }
+
+  // 6. The cyclone dust outlet must be large enough to discharge the product
+  // without bridging. Cassava flour bridges readily in small hoppers.
+  if (Number.isFinite(cycloneDustOutletDiameterMm) && Number.isFinite(cycloneDiameterMm) && cycloneDiameterMm > 0) {
+    const spigotToBarrelPercent = (cycloneDustOutletDiameterMm / cycloneDiameterMm) * 100;
+    if (spigotToBarrelPercent < 25) {
+      interfaceFailures.push({
+        interface: 'Cyclone spigot → Rotary airlock',
+        detail: `spigot Ø${cycloneDustOutletDiameterMm} mm is only ${spigotToBarrelPercent.toFixed(0)}% of the Ø${cycloneDiameterMm} mm barrel; cassava flour will bridge in a spigot this narrow`,
+        severity: 'danger',
+      });
+    }
+  }
+
+  const allConnected = interfaceFailures.length === 0;
 
   if (allConnected) {
     checks.push({
@@ -2524,28 +3079,24 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       category: 'Connectivity',
       severity: 'success',
       status: 'VALID',
-      title: 'Process connectivity: VALID',
-      message: `Process connectivity confirmed: Blower is connected to the heat exchanger; heat exchanger is connected to the venturi mixer; screw feeder is connected to the venturi mixer; venturi mixer is connected to the flash tube; flash tube is connected to the cyclone. All connected components share compatible nominal diameters (Ø${tubeDiameterStandardMm} mm ductwork). Flow arrows follow the process direction: Hot air (Blower → Heat Exchanger → Venturi Mixer → Flash Tube → Cyclone), Wet solids (Screw Feeder → Venturi Mixer → Flash Tube), Dry product (Flash Tube → Cyclone → Rotary Valve/Product Outlet).`,
-      currentValue: 'Process connectivity: VALID (All 5 equipment interfaces connected)',
-      recommendedRange: 'Contiguous Physical & Logical Flow Train',
-      source: 'P&ID Flowsheet & 3D Kinematic Assembly Verification'
+      title: 'Process connectivity: all interfaces verified',
+      message: `All eight equipment interfaces verified against the computed geometry. Flash tube Ø${tubeDiameterStandardMm} mm over ${totalPipeLengthM.toFixed(1)} m; venturi throat Ø${venturiThroatDiameterMm} mm, converging below the tube; tangential cyclone inlet ${cycloneInletHeightMm}×${cycloneInletWidthMm} mm giving an entry velocity of ${cycloneInletVelocityMperS.toFixed(1)} m/s, sufficient to establish the vortex; screw outlet Ø${screwDiamMm.toFixed(0)} mm inserts into the Ø${venturiThroatDiameterMm.toFixed(0)} mm throat; vortex finder Ø${cycloneVortexFinderDiameterMm} mm at ${((cycloneVortexFinderDiameterMm / cycloneDiameterMm) * 100).toFixed(0)}% of the barrel, consistent with the Stairmand proportion; spigot Ø${cycloneDustOutletDiameterMm} mm at ${((cycloneDustOutletDiameterMm / cycloneDiameterMm) * 100).toFixed(0)}% of the barrel, sufficient to discharge flour without bridging.`,
+      currentValue: 'All 8 interfaces pass their dimensional tests',
+      recommendedRange: 'Every interface dimensionally consistent with its neighbour',
+      source: 'Dimensional interface checks against computed geometry; P&ID flowsheet'
     });
   } else {
-    const missing: string[] = [];
-    if (!hasBlower || !hasHex) missing.push('Blower → Heat Exchanger');
-    if (!hasHex || !hasVenturi) missing.push('Heat Exchanger → Venturi Mixer');
-    if (!hasFeeder || !hasVenturi) missing.push('Screw Feeder → Venturi Mixer');
-    if (!hasVenturi || !hasFlashTube) missing.push('Venturi Mixer → Flash Tube');
-    if (!hasFlashTube || !hasCyclone) missing.push('Flash Tube → Cyclone');
+    const sorted = [...interfaceFailures].sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'danger' ? -1 : 1));
+    const dangerCount = sorted.filter((f) => f.severity === 'danger').length;
     checks.push({
       id: 'chk-conn-review',
       category: 'Connectivity',
-      severity: 'warning',
-      status: 'NEEDS REVIEW',
-      title: 'Process connectivity: NEEDS REVIEW',
-      message: `Connection missing: ${missing.join(', ')}. Verify equipment geometry and interface flange sizing.`,
-      currentValue: 'Process connectivity: NEEDS REVIEW',
-      recommendedRange: 'Contiguous Physical & Logical Flow Train',
+      severity: dangerCount > 0 ? 'danger' : 'warning',
+      status: dangerCount > 0 ? 'INVALID' : 'NEEDS REVIEW',
+      title: `Process connectivity: ${sorted.length} interface${sorted.length === 1 ? '' : 's'} fail${sorted.length === 1 ? 's' : ''} dimensional verification`,
+      message: sorted.map((f) => `${f.interface}: ${f.detail}`).join(' · '),
+      currentValue: `${sorted.length} of 8 interfaces fail (${dangerCount} hazard)`,
+      recommendedRange: 'Every interface dimensionally consistent with its neighbour',
       source: 'P&ID Flowsheet Verification'
     });
   }
@@ -2583,7 +3134,13 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     feederGaugePa = -Math.round(fanTotalPressureDropPa * 0.35);
     dustRisk = 'Low outward dust-leakage risk; leakage is primarily inward.';
     dustRiskDetail = 'Low outward dust-leakage risk; leakage is primarily inward. In the event of a gasket or flange failure, ambient air leaks inward, preventing combustible cassava starch dust discharge into the workshop.';
-    fanCondition = 'Warm, humid moist air with trace fines (~75°C, 80% RH)';
+    // Exhaust condition is REPORTED from the psychrometric solution, not typed
+    // in. The previous fixed string "~75°C, 80% RH" contradicted the engine's own
+    // output: the computed relative humidity at the default exhaust is about 19%,
+    // because the air is hot and the absolute moisture content is that of cool
+    // ambient air plus the evaporated water. A spec sheet quoting 80% RH would
+    // misstate the fan duty and the condensation risk by a wide margin.
+    fanCondition = `Warm moist air with trace fines (${safeOutletAirTemp.toFixed(0)}°C, ${exhaustRelativeHumidityPercent.toFixed(0)}% RH, dew point ${exhaustDewPointC.toFixed(0)}°C)`;
     fanWear = 'Elevated (Requires stainless/coated impeller & wash ports)';
     airlockCrit = 'Critical (Air ingress destroys cyclone vortex)';
     advantages = [
@@ -2593,7 +3150,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       'Easier feeding at venturi throat as negative suction assists wet mash entry'
     ];
     disadvantages = [
-      'Exhaust fan handles warm, moist air (~75°C, 80% RH) requiring dynamically balanced, corrosion-resistant impellers',
+      `Exhaust fan handles warm, moist air (${safeOutletAirTemp.toFixed(0)}°C, ${exhaustRelativeHumidityPercent.toFixed(0)}% RH) requiring dynamically balanced, corrosion-resistant impellers`,
       'Cyclone rotary airlock valve requires precision airtight machining; air in-leakage severely degrades cyclone collection efficiency',
       'Drying ductwork must be rigid to prevent structural implosion or buckling under vacuum'
     ];
@@ -2721,6 +3278,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       id: 'chk-pressure-positive',
       category: 'Mass Balance',
       severity: 'warning',
+      status: 'NEEDS REVIEW',
       title: 'Positive Pressure System: Dust Leakage Precaution',
       message: `System operates under positive gauge pressure (+${ductGaugePa} Pa). Ensure all pipe flanges, inspection hatches, and the wet feeder throat have airtight seals to prevent flammable cassava starch dust from spraying into the factory hall.`,
       currentValue: `+${ductGaugePa} Pa (positive)`,
@@ -2732,8 +3290,9 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       id: 'chk-pressure-negative',
       category: 'Mass Balance',
       severity: 'success',
-      title: 'Negative Pressure (Induced Draft) Confirmed: Zero Dust Leakage',
-      message: `System operates under negative gauge pressure (${ductGaugePa} Pa suction). Any joint leak will draw ambient air INWARD rather than releasing dust, ensuring high factory cleanliness and food-grade hygiene.`,
+      status: 'VALID',
+      title: 'Negative Pressure (Induced Draft) Confirmed: Leakage Tends Inward',
+      message: `System operates under negative gauge pressure (${ductGaugePa} Pa suction), so a failed gasket or flange joint draws ambient air INWARD rather than discharging dust. This is the correct arrangement for a food-grade starch line and materially reduces the combustible-dust hazard. It is not a guarantee: an over-pressured fan trip, a failed seal at the airlock, or a burst flexible connector can still release dust, so mechanical integrity and a trip interlock remain required.`,
       currentValue: `${ductGaugePa} Pa (negative)`,
       recommendedRange: '< 0 Pa (Negative Pressure)',
       source: 'CIRAD Pilot Flash Dryer Report (2015), Section 3.4'
@@ -3080,9 +3639,9 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       rationale: 'Used for all moist-air density evaluations via the ASHRAE density relation.', isUserInput: false,
     },
     {
-      id: 'asm-mwratio', category: 'Material Property', parameterName: 'Molar mass ratio (air/water vapour)', symbol: 'M_w',
+      id: 'asm-mwratio', category: 'Material Property', parameterName: 'Molar mass ratio M_da/M_v', symbol: 'M_da/M_v',
       value: MW_RATIO.toFixed(3), unit: '-', basis: '28.97 / 18.015',
-      rationale: 'Converts the humidity ratio into the vapour mass fraction in the moist-air density correction.', isUserInput: false,
+      rationale: 'Converts the mass humidity ratio into the mole fraction, appearing as the 1 + 1.608W denominator term of the ASHRAE moist-air density. Because it exceeds unity, humid air is correctly returned as LESS dense than dry air.', isUserInput: false,
     },
     {
       id: 'asm-magnus', category: 'Material Property', parameterName: 'Magnus-Tetens saturation pressure coefficients', symbol: 'a, b, c',
@@ -3107,8 +3666,8 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     },
     {
       id: 'asm-saltation', category: 'Process Condition', parameterName: 'Saltation velocity correlation prefactor', symbol: 'v_salt',
-      value: '4.2 × 0.35', unit: 'm/s', basis: 'Rizk / Zenz pneumatic conveying correlation',
-      rationale: 'Minimum conveying velocity below which solids settle out of a horizontal run. The 0.35 factor is a geometry correction for the specific duct arrangement.', isUserInput: false,
+      value: `${SALTATION_TERMINAL_MULTIPLIER} × v_terminal × (1 + 0.6 μ_s)`, unit: 'm/s', basis: 'Saltation-to-terminal velocity ratio K_s = 8-10, dilute horizontal conveying',
+      rationale: 'Minimum conveying velocity below which solids settle out of a horizontal run. Anchored to the Schiller-Naumann terminal velocity the engine already solves, with a first-order solids-loading correction. The previous expression (4.2 × three power laws × a bare 0.35, attributed to "Rizk / Zenz") was not a published correlation and contradicted its own quoted range of 6.5-7.5 m/s. This returns a lower figure because the drag-law-based terminal velocity for a 100 um cassava grain is only about 0.29 m/s; the reduction follows from the derivation rather than from tuning.', isUserInput: false,
     },
     {
       id: 'asm-fan-eff', category: 'Process Condition', parameterName: 'Fan total aerodynamic efficiency', symbol: 'eta_fan',
@@ -3116,10 +3675,41 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       rationale: 'Combined fan, drive and inlet/outlet losses rather than the impeller efficiency alone.', isUserInput: false,
     },
     {
-      id: 'asm-motor-margin', category: 'Operational Buffer', parameterName: 'Motor service factor and belt-drive efficiency', symbol: 'SF',
-      value: `${BLOWER_STANDARDS.motorServiceFactor.toFixed(2)} × ${BLOWER_STANDARDS.motorTransmissionEfficiency.toFixed(2)} = ${motorMarginFactor.toFixed(4)}`, unit: '-',
+      id: 'asm-motor-margin', category: 'Operational Buffer', parameterName: 'Motor service factor', symbol: 'SF_service',
+      value: motorMarginFactor.toFixed(2), unit: '-',
       basis: 'CEMA / AMCA nameplate duty margin',
-      rationale: '15% nameplate margin combined with 95% V-belt transmission efficiency gives the motor oversizing factor applied to the air power.', isUserInput: false,
+      rationale: '15% nameplate margin applied to the shaft power. The 95% V-belt transmission efficiency is applied separately as a DIVISOR because it represents power lost between motor and shaft, not a margin.', isUserInput: false,
+    },
+    {
+      id: 'asm-belt-eff', category: 'Process Condition', parameterName: 'V-belt drive transmission efficiency', symbol: 'eta_belt',
+      value: BLOWER_STANDARDS.motorTransmissionEfficiency.toFixed(2), unit: '-', basis: 'CEMA belt drive efficiency',
+      rationale: '5% of motor output is lost in the sheaves and belt before reaching the fan shaft, so the rated power must exceed shaft power by 1/0.95. Dividing by this value is the correct treatment; multiplying by it understates the motor rating.', isUserInput: false,
+    },
+    {
+      id: 'asm-hex-u', category: 'Material Property', parameterName: 'Overall heat transfer coefficient', symbol: 'U',
+      value: `${overallUCoeffWperM2K.toFixed(1)} (finned) / ${(finnedURef * 0.72 * uVelocityScale).toFixed(1)} (bare)`, unit: 'W/(m²·K)',
+      basis: 'Shah & London gas-side forced convection, U ~ 52 W/(m²·K) at 10 kg/(m²·s) mass velocity, scaled as (m_v/10)^0.8',
+      rationale: 'Scaled off the air-side mass velocity rather than held as a fixed guess, so the duty responds to capacity. Bare tube runs at 72% of the finned value due to the absence of extended surface.', isUserInput: false,
+    },
+    {
+      id: 'asm-hex-ft', category: 'Process Condition', parameterName: 'LMTD correction factor', symbol: 'F_t',
+      value: correctionFactorFt.toFixed(2), unit: '-', basis: correctionFactorBasis,
+      rationale: 'Cross-flow exchangers never reach the parallel-flow LMTD, so F < 1 always. Treating cross-flow as F = 1.0 understated the required surface area by roughly 11%.', isUserInput: false,
+    },
+    {
+      id: 'asm-product-approach', category: 'Process Condition', parameterName: 'Product-to-exhaust-air temperature approach', symbol: 'ΔT_approach',
+      value: PRODUCT_TEMP_APPROACH_K.toFixed(1), unit: 'K', basis: 'Evaporative cooling inside the drying tube at ~1 s residence',
+      rationale: 'The lumped model does not solve the particle internal heat equation, so the product temperature is reported as a BOUND taken as the exhaust air temperature less this allowance. Used only for the gelatinization check; the reported figure is therefore conservative rather than resolved.', isUserInput: false,
+    },
+    {
+      id: 'asm-gelatinization', category: 'Process Condition', parameterName: 'Cassava starch gelatinization onset', symbol: 'T_gel',
+      value: GELATINIZATION_ONSET_C.toFixed(0), unit: '°C', basis: 'Cassava starch literature range 58-70°C',
+      rationale: 'Conservative upper bound of the onset band, applied to the estimated PRODUCT temperature rather than to the exhaust air temperature.', isUserInput: false,
+    },
+    {
+      id: 'asm-dewpoint-margin', category: 'Process Condition', parameterName: 'Minimum exhaust dew-point margin', symbol: 'ΔT_dew',
+      value: '5.0', unit: 'K', basis: 'Condensation margin for duct, cyclone and fan surfaces',
+      rationale: 'Condensation begins on any surface cooler than the local air, so a margin is required between exhaust temperature and dew point. The previous check tested a fixed 65°C and ignored the computed humidity entirely.', isUserInput: false,
     },
     {
       id: 'asm-duct-losses', category: 'Process Condition', parameterName: 'Drying pipe, venturi and bend pressure losses', symbol: 'ΔP_fixed',

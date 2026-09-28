@@ -32,8 +32,9 @@ export const PrintableReportModal: React.FC<PrintableReportModalProps> = ({
     window.print();
   };
 
-  const handleDownloadPdf = () => {
-    const doc = generateEngineeringPdf(results);
+  // Async because generateEngineeringPdf imports jsPDF on demand.
+  const handleDownloadPdf = async () => {
+    const doc = await generateEngineeringPdf(results);
     doc.save(`Cassava_Flash_Dryer_Report_${results.dimensions.tubeDiameterStandardMm}mm_${results.materialBalance.productRateKgH.toFixed(0)}kgh.pdf`);
   };
 

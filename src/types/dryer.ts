@@ -43,7 +43,13 @@ export interface DryerInputs {
 
   // Heat Exchanger Parameters (CIRAD Module 4)
   heatExchangerPasses: number; // Number of tube passes (e.g. 1, 2, 3, 4 passes)
-  heatExchangerType?: 'cross_flow_finned' | 'shell_and_tube' | 'cross_flow_bare';
+  // 'shell_and_tube_1pass' and 'shell_and_tube_2pass' replace the previous
+  // 'shell_and_tube'. The LMTD correction differs between a single-pass
+  // (F = 1.00) and a two-pass (F ~ 0.96) shell-and-tube exchanger, so a single
+  // undifferentiated tag could not select the right correction. The union also
+  // now matches what the calculation engine actually branches on, which it
+  // previously did not.
+  heatExchangerType?: 'cross_flow_finned' | 'cross_flow_bare' | 'shell_and_tube_1pass' | 'shell_and_tube_2pass';
 
   // Standard nominal pipe diameter override (optional, e.g. 710, 900, 1000 mm)
   standardPipeNominalMm?: number;
@@ -72,7 +78,9 @@ export interface DryerInputs {
   screwDiameterMm?: number; // screw diameter (mm), default 100 mm (4 in)
   screwLengthMm?: number; // screw length (mm), default 1000 mm
   screwLoadingPercent?: number; // trough loading %, default 30%
-  screwCapacityFactorPerRpm?: number; // capacity per RPM (ft³/h/RPM), default 0.41 for 4" screw at 30%
+  // screwCapacityFactorPerRpm was removed as an input: capacity is derived from
+  // screw diameter, pitch, shaft diameter and trough loading by the CEMA geometric
+  // relation, so it can never contradict the geometry the user specified.
   screwSelectedRpm?: number; // user selected operating RPM, default 55 RPM
   screwMaterialFactor?: number; // Fm, default 1.2 for cassava cake
   screwFlightFactor?: number; // Ff, default 1.0 (standard pitch)
@@ -204,7 +212,7 @@ export interface FlashTubeDevelopedLengthReport {
 }
 
 export interface HeatExchangerSpecs {
-  type: 'cross_flow_finned' | 'shell_and_tube' | 'cross_flow_bare';
+  type: 'cross_flow_finned' | 'cross_flow_bare' | 'shell_and_tube_1pass' | 'shell_and_tube_2pass';
   numberOfPasses: number;
   thermalDutyKW: number;
   thermalDutyKcalH: number;
@@ -489,9 +497,14 @@ export type ValidationCheckSeverity = 'success' | 'info' | 'warning' | 'danger';
 
 export interface ValidationCheck {
   id: string;
-  category: 'Velocity' | 'Temperature' | 'Residence Time' | 'Energy' | 'Geometry' | 'Mass Balance' | 'Connectivity' | 'Input Validation';
+  category: 'Velocity' | 'Temperature' | 'Residence Time' | 'Energy' | 'Geometry' | 'Mass Balance' | 'Connectivity' | 'Input Validation' | 'Material Property';
   severity: ValidationCheckSeverity;
-  status?: ValidationStatus;
+  // Required, not optional. It was optional because two pressure checks omitted
+  // it, so the UI silently fell back to deriving a status from severity and the
+  // two could disagree. Every check now sets it explicitly, and making it
+  // required in the type means the next omission is a compile error rather than a
+  // quiet inconsistency. See referenceDesigns.test.ts for the enforcement test.
+  status: ValidationStatus;
   title: string;
   message: string;
   currentValue: string;

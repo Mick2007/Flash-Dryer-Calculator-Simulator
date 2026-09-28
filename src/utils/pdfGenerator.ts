@@ -1,5 +1,5 @@
-import { jsPDF } from 'jspdf';
-import { CalculationResults } from '../types/dryer';
+import type { jsPDF } from 'jspdf';
+import type { CalculationResults } from '../types/dryer';
 
 /**
  * Sanitizes strings for jsPDF standard Helvetica font to prevent glyph glitches
@@ -29,8 +29,15 @@ function cleanPdfText(text: string): string {
     .replace(/[‘’]/g, "'");
 }
 
-export function generateEngineeringPdf(results: CalculationResults): jsPDF {
-  const doc = new jsPDF({
+// jsPDF is loaded on demand rather than statically imported.
+//
+// The library is roughly 350 kB minified and is only needed when the user
+// actually exports a PDF — which for most sessions is never. A static import put
+// it in the initial bundle and inflated the main chunk for every visitor.
+// `import type` above keeps the return type accurate without loading the code.
+export async function generateEngineeringPdf(results: CalculationResults): Promise<jsPDF> {
+  const { jsPDF: JsPDF } = await import('jspdf');
+  const doc = new JsPDF({
     orientation: 'portrait',
     unit: 'mm',
     format: 'a4',

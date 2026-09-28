@@ -54,8 +54,15 @@ export const CIRAD_PILOT_BENCHMARK: DryerInputs = {
   airVelocity: 15.0, // m/s (CIRAD optimal conveying velocity)
   altitude: 100.0, // meters above sea level
   particleDiameter: 230.0, // µm (CIRAD experimental mean for cassava starch/flour)
-  particleDensity: 1480.0, // kg/m³
-  bulkDensity: 1380.0, // kg/m³
+  particleDensity: 1480.0, // kg/m³: true (solid) density of cassava starch
+  // CORRECTED from 1380. Against a particle density of 1480, the old value implied
+  // a bed voidage of only 6.8%, which describes a near-solid block rather than a
+  // bulk solid, and made every volume derived from it (hopper, feed duct, screw
+  // trough) too small. Dewatered press cake is a porous bed and occupies roughly
+  // 35-45% voidage, giving 810-960 kg/m3; 900 sits mid-band at 39% voidage.
+  // NOTE: this value is derived from voidage physics, NOT read from the IITA
+  // source. It should be confirmed against the reference spreadsheets.
+  bulkDensity: 900.0, // kg/m³
   cassavaSpecificHeat: 1.67, // kJ/(kg·K)
   methodology: 'cirad',
   cycloneType: 'stairmand',
@@ -76,7 +83,6 @@ export const CIRAD_PILOT_BENCHMARK: DryerInputs = {
   screwDiameterMm: 100,
   screwLengthMm: 1000,
   screwLoadingPercent: 30,
-  screwCapacityFactorPerRpm: 0.41,
   screwSelectedRpm: 55,
   screwMaterialFactor: 1.2,
   screwFlightFactor: 1.0,
@@ -108,7 +114,7 @@ export const IITA_REFERENCE_BENCHMARK: DryerInputs = {
   altitude: 100.0,
   particleDiameter: 230.0,
   particleDensity: 1480.0,
-  bulkDensity: 1380.0, // kg/m³: Dewatered cassava mash cake density used in IITA/Kuye reference
+  bulkDensity: 900.0, // kg/m³: Dewatered cassava mash cake, ~39% bed voidage. Corrected from 1380, which was near-solid against a 1480 particle density. Confirm against the reference spreadsheets.
   cassavaSpecificHeat: 1.67,
   methodology: 'hybrid',
   cycloneType: 'stairmand',
@@ -133,7 +139,6 @@ export const IITA_REFERENCE_BENCHMARK: DryerInputs = {
   screwDiameterMm: 100,
   screwLengthMm: 1000,
   screwLoadingPercent: 30,
-  screwCapacityFactorPerRpm: 0.41,
   screwSelectedRpm: 55,
   screwMaterialFactor: 1.2,
   screwFlightFactor: 1.0,
@@ -164,8 +169,12 @@ export const MATERIAL_PROPERTY_PRESETS: MaterialPropertyPreset[] = [
     id: 'dewatered_mash_cake',
     name: 'Dewatered Cassava Mash Cake (IITA/RMRDC Reference)',
     description: 'Mechanically pressed cassava mash cake (40-45% moisture w.b.). Cohesive, semi-abrasive, packs easily, requires steep hopper walls to avoid bridging.',
-    bulkDensityKgM3: 1380,
-    bulkDensityLbFt3: 86.15,
+    // 900 kg/m3 implies ~39% bed voidage against a 1480 kg/m3 particle density.
+    // The previous 1380 implied 6.8% voidage, i.e. a near-solid block, and is not
+    // achievable for a pressed cake. Derived from voidage physics; confirm
+    // against the reference spreadsheets.
+    bulkDensityKgM3: 900,
+    bulkDensityLbFt3: 56.19,
     materialFactorFm: 1.2,
     standardTroughLoadingPercent: 30,
     cemaClassification: 'Class 30 - Semi-abrasive, cohesive cake',

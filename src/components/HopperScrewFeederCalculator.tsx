@@ -21,7 +21,11 @@ import {
 } from 'lucide-react';
 import { CalculationResults, DryerInputs } from '../types/dryer';
 import { MATERIAL_PROPERTY_PRESETS, MaterialPropertyPreset } from '../utils/constants';
-import { HopperScrew3DViewer } from './HopperScrew3DViewer';
+// Second three.js consumer. Lazy-loaded for the same reason as Cad3dViewer: the
+// WebGL library is only needed once the user reaches the hopper/feeder tab.
+const HopperScrew3DViewer = React.lazy(() =>
+  import('./HopperScrew3DViewer').then((m) => ({ default: m.HopperScrew3DViewer })),
+);
 import { ScrewFeederDrawing } from './ScrewFeederDrawing';
 
 interface HopperScrewFeederCalculatorProps {
@@ -564,10 +568,18 @@ RECOMMENDED INSTALLED MOTOR: ${screwFeederDesign.recommendedMotorPowerKW.toFixed
             {/* Main Visualizer Content Area */}
             {diagramView === '3d' && (
               <div className="space-y-4">
-                <HopperScrew3DViewer
-                  hopperDesign={hopperDesign}
-                  screwFeederDesign={screwFeederDesign}
-                />
+                <React.Suspense
+                  fallback={
+                    <div className="flex items-center justify-center h-64 bg-slate-950 text-slate-400 text-xs font-mono tracking-wider uppercase">
+                      Loading 3D assembly…
+                    </div>
+                  }
+                >
+                  <HopperScrew3DViewer
+                    hopperDesign={hopperDesign}
+                    screwFeederDesign={screwFeederDesign}
+                  />
+                </React.Suspense>
               </div>
             )}
 

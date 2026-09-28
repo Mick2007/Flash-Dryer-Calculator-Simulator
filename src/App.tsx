@@ -142,10 +142,11 @@ export default function App() {
     showToast('Reset to IITA / RMRDC 820 kg/h Reference Design Benchmark');
   }, []);
 
-  // PDF Export
-  const handleExportPdf = useCallback(() => {
+  // PDF Export. Async because generateEngineeringPdf now imports jsPDF on demand,
+  // keeping the ~350 kB PDF library out of the initial bundle.
+  const handleExportPdf = useCallback(async () => {
     try {
-      const doc = generateEngineeringPdf(results);
+      const doc = await generateEngineeringPdf(results);
       const filename = `Cassava_Flash_Dryer_Design_${results.materialBalance.productRateKgH.toFixed(0)}kg_h.pdf`;
       doc.save(filename);
       showToast(`Engineering calculation dossier exported: ${filename}`);

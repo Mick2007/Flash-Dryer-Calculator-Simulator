@@ -18,7 +18,15 @@ import {
 } from 'lucide-react';
 import { CalculationResults } from '../types/dryer';
 import { CadExportModal } from './CadExportModal';
-import { Cad3dViewer, CadViewMode } from './Cad3dViewer';
+import type { CadViewMode } from './Cad3dViewer';
+
+// three.js is the single largest dependency in this project and the 3D viewer is
+// the only consumer of it. Loading it on demand keeps roughly 600 kB of WebGL
+// code out of the initial bundle, so the calculator is usable without paying for
+// the 3D model until the user actually opens it.
+const Cad3dViewer = React.lazy(() =>
+  import('./Cad3dViewer').then((m) => ({ default: m.Cad3dViewer })),
+);
 
 interface DryerVisualizerProps {
   results: CalculationResults;
@@ -600,18 +608,26 @@ export const DryerVisualizer: React.FC<DryerVisualizerProps> = ({ results, onSel
               : 'lg:col-span-8 bg-slate-950 flex flex-col relative min-h-[500px] lg:min-h-[600px] overflow-hidden'
           }
         >
-          <Cad3dViewer
-            results={results}
-            viewMode={viewMode}
-            onViewModeChange={setViewMode}
-            selectedComponent={selectedComponent}
-            onSelectComponent={setSelectedComponent}
-            showDimensions={showDimensions}
-            showFlowArrows={showFlowArrows}
-            isSectional={viewMode === 'sectional'}
-            isFullscreen={isFullscreen}
-            onToggleFullscreen={toggleFullscreen}
-          />
+          <React.Suspense
+            fallback={
+              <div className="flex-1 flex items-center justify-center bg-slate-950 text-slate-400 text-xs font-mono tracking-wider uppercase">
+                Loading 3D assembly…
+              </div>
+            }
+          >
+            <Cad3dViewer
+              results={results}
+              viewMode={viewMode}
+              onViewModeChange={setViewMode}
+              selectedComponent={selectedComponent}
+              onSelectComponent={setSelectedComponent}
+              showDimensions={showDimensions}
+              showFlowArrows={showFlowArrows}
+              isSectional={viewMode === 'sectional'}
+              isFullscreen={isFullscreen}
+              onToggleFullscreen={toggleFullscreen}
+            />
+          </React.Suspense>
         </div>
 
         {/* Component Inspection Sidebar */}
