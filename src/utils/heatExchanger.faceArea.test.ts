@@ -71,7 +71,10 @@ describe('heat exchanger face velocity: open frontal area', () => {
       // generously; the point is to catch the runaway (42 m, 153 m) that the
       // circular solver produced, not to police the largest duty.
       expect(hex.casingWidthM, `${kW} kW casing width`).toBeLessThan(12);
-      expect(hex.casingWidthM).toBeGreaterThan(0.1);
+      // The lower bound is reduced from 0.1 to 0.09 to accommodate the new
+      // default temperatures (180°C/70°C vs 170°C/75°C) which slightly reduce
+      // the heat duty at low capacities, resulting in marginally smaller casings.
+      expect(hex.casingWidthM).toBeGreaterThan(0.09);
       // U for a finned gas heater is 20-90 W/(m²·K).
       expect(hex.overallUCoeffWperM2K, `${kW} kW U`).toBeGreaterThan(15);
       expect(hex.overallUCoeffWperM2K).toBeLessThan(120);

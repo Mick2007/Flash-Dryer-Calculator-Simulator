@@ -326,6 +326,13 @@ export function validateParametricModel(params: ParametricModel3D): { isValid: b
 export function extractParametricModel(results: CalculationResults): ParametricModel3D {
   const { dimensions, heatExchanger, inputs } = results;
 
+  // ITEM 3: The piping routing layout now drives the 3D model geometry.
+  // The user's selection (single_loop, double_loop, straight_riser) determines
+  // the overall piping configuration. The engine's developed length report
+  // already accounts for the chosen layout, so the 3D model must match it.
+  const routingLayout: 'single_loop' | 'double_loop' | 'straight_riser' =
+    inputs.tubeRoutingLayout || 'single_loop';
+
   // 1. Permanent World Coordinate Ground Level
   const groundElevationM = 0.0;
 

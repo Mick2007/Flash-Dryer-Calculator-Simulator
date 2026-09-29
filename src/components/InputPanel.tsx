@@ -1306,7 +1306,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   <NumericField
                     value={inputs.screwSelectedRpm ?? 55}
                     onCommit={(v) => update('screwSelectedRpm', Math.round(v))}
-                    min={10}
+                    min={1}
                     max={120}
                     step={1}
                     data-testid="field-screw-rpm"

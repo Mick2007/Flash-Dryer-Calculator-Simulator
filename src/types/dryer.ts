@@ -128,7 +128,7 @@ export interface HopperDesignReport {
 export interface ScrewFeederDesignReport {
   wetFeedRateKgH: number;
   bulkDensityKgM3: number;
-  bulkDensityLbFt3: number; // 86.15 lb/ft³
+  bulkDensityLbFt3: number; // 23.72 lb/ft³ (at 380 kg/m³)
   volumetricFlowM3H: number; // Qv = Fr / rho_b (0.5942 m³/h)
   volumetricFlowFt3H: number; // Qv * 35.3147 (20.98 ft³/h)
   screwDiameterMm: number; // 100 mm (4 in)

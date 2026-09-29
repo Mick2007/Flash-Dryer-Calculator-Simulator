@@ -293,7 +293,7 @@ RECOMMENDED INSTALLED MOTOR: ${screwFeederDesign.recommendedMotorPowerKW.toFixed
               <span>Section 12: Material-Property Assumption (CEMA &amp; Martin Engineering Basis)</span>
             </h4>
             <p className="text-xs text-amber-900 leading-relaxed font-medium">
-              <strong>Engineering Note:</strong> Standard Martin Conveyor / CEMA engineering handbooks do not have a dedicated pre-cataloged entry for mechanically pressed cassava filter cake. Therefore, the IITA / RMRDC reference design (Kuye et al. 2011, p. 15–16) adopts a comparable material assumption: Class 30 semi-abrasive, cohesive dewatered cake with bulk density <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-900 font-mono font-bold">1380 kg/m³ (86.15 lb/ft³)</code>, material factor <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-900 font-mono font-bold">F_m = 1.2</code>, and 30% trough fill.
+              <strong>Engineering Note:</strong> Standard Martin Conveyor / CEMA engineering handbooks do not have a dedicated pre-cataloged entry for mechanically pressed cassava filter cake. Therefore, the IITA / RMRDC reference design (Kuye et al. 2011, p. 15–16) adopts a comparable material assumption: Class 30 semi-abrasive, cohesive dewatered cake with bulk density <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-900 font-mono font-bold">380 kg/m³ (23.72 lb/ft³)</code>, material factor <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-900 font-mono font-bold">F_m = 1.2</code>, and 30% trough fill.
             </p>
           </div>
         </div>

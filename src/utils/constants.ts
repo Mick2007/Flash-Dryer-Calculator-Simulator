@@ -47,8 +47,8 @@ export const CIRAD_PILOT_BENCHMARK: DryerInputs = {
   finalMoisture: 12.0, // % wet basis (HQCF flour standard)
   ambientTemp: 27.0, // °C
   ambientRH: 70.0, // %
-  inletAirTemp: 170.0, // °C (CIRAD validated range 170 - 180°C)
-  outletAirTemp: 75.0, // °C (CIRAD validated range 70 - 80°C)
+  inletAirTemp: 180.0, // °C (CIRAD validated range 170 - 180°C)
+  outletAirTemp: 70.0, // °C (CIRAD validated range 70 - 80°C)
   feedTemp: 25.0, // °C
   finalProductTemp: 50.0, // °C
   airVelocity: 15.0, // m/s (CIRAD optimal conveying velocity)
@@ -114,8 +114,8 @@ export const IITA_REFERENCE_BENCHMARK: DryerInputs = {
   finalMoisture: 12.0, // % wet basis
   ambientTemp: 27.0, // °C
   ambientRH: 70.0, // %
-  inletAirTemp: 170.0, // °C
-  outletAirTemp: 75.0, // °C
+  inletAirTemp: 180.0, // °C
+  outletAirTemp: 70.0, // °C
   feedTemp: 25.0, // °C
   finalProductTemp: 50.0, // °C
   airVelocity: 14.0, // m/s

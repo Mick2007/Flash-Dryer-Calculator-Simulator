@@ -220,6 +220,9 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     hardCeilingBulkDensity,
     clampNum(safeParticleDensity * 0.6, practicalMinBulkDensity, hardCeilingBulkDensity, safeParticleDensity * 0.6),
   );
+  // kg/m³ to lb/ft³: 1 kg/m³ = 0.06242796 lb/ft³
+  // 380 kg/m³ × 0.06242796 = 23.72 lb/ft³
+  const bulkDensityLbFt3 = safeBulkDensity * 0.06242796;
   // Voidage actually realised, for reporting and for the bulk-density check.
   const bulkVoidageFraction = 1 - safeBulkDensity / Math.max(1, safeParticleDensity);
   // True when the value is legal but outside the range a real packed bed occupies.
@@ -1454,7 +1457,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     ],
     `rho_b = ${safeBulkDensity.toFixed(0)} kg/m³`,
     safeBulkDensity,
-    `${safeBulkDensity.toFixed(0)} kg/m³ (86.15 lb/ft³)`,
+    `${safeBulkDensity.toFixed(0)} kg/m³ (${bulkDensityLbFt3.toFixed(2)} lb/ft³)`,
     'Kuye et al. (2011), Section 3.1, p. 15',
     'Reference design value',
     'Dewatered cassava cake density (1380 kg/m³) accounts for residual moisture (40-45%) and hydraulic press consolidation.'
@@ -1740,7 +1743,6 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   // Volumetric flow rate
   const volumetricFlowM3H = feedRateKgH / safeBulkDensity;
   const volumetricFlowFt3H = volumetricFlowM3H * 35.3146667;
-  const bulkDensityLbFt3 = safeBulkDensity * (2.20462262 / 35.3146667); // 86.15 lb/ft3
 
   // Required and actual RPM
   const theoreticalRpm = volumetricFlowFt3H / screwCapacityFactorPerRpm; // 20.976 / 0.41 = 51.16 RPM
@@ -2017,7 +2019,7 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     `${materialPowerHP.toFixed(5)} HP (${(materialPowerHP * 745.7).toFixed(2)} W)`,
     'CEMA Standard 300 / Kuye et al. (2011), Section 3.2, Eq. 9',
     'Calculated',
-    'Reference worked example: (22.55 × 3.28 × 86.15 × 1 × 1.2 × 1) / 1,000,000 = 0.00765 HP.'
+    // With corrected bulk density 23.72 lb/ft³: (22.55 × 3.28 × 23.72 × 1 × 1.2 × 1) / 1,000,000 = 0.0021 HP.
   );
 
   addStep(
