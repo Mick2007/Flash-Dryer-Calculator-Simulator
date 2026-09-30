@@ -180,11 +180,14 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
               {inputs.capacityMode === 'product' ? (
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-semibold text-slate-700">
+                    <label htmlFor="target-dry-flour-input" className="text-xs font-semibold text-slate-700">
                       Target Dry Flour Output (F_prod)
                     </label>
                     <div className="flex items-center gap-1">
                       <select
+                        id="target-product-unit-select"
+                        name="capacityProductUnit"
+                        aria-label="Target dry flour capacity unit"
                         value={capacityInputUnit}
                         onChange={(e) => setCapacityInputUnit(e.target.value as any)}
                         className="text-[10px] font-bold py-0.5 px-1.5 border border-slate-300 rounded bg-slate-50 text-slate-700 focus:ring-1 focus:ring-emerald-500"
@@ -203,6 +206,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   </div>
                   <div className="relative">
                     <input
+                      id="target-dry-flour-input"
+                      name="desiredProductRate"
+                      aria-label="Target Dry Flour Output"
                       type="number"
                       min={0.01}
                       step={capacityInputUnit === 'tonne_h' ? 0.05 : capacityInputUnit === 'tonne_day' ? 0.5 : 1}
@@ -252,11 +258,14 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
               ) : (
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-semibold text-slate-700">
+                    <label htmlFor="wet-feed-rate-input" className="text-xs font-semibold text-slate-700">
                       Wet Cassava Feed Rate (F_wet)
                     </label>
                     <div className="flex items-center gap-1">
                       <select
+                        id="wet-feed-unit-select"
+                        name="capacityFeedUnit"
+                        aria-label="Wet cassava feed capacity unit"
                         value={capacityInputUnit}
                         onChange={(e) => setCapacityInputUnit(e.target.value as any)}
                         className="text-[10px] font-bold py-0.5 px-1.5 border border-slate-300 rounded bg-slate-50 text-slate-700 focus:ring-1 focus:ring-emerald-500"
@@ -275,6 +284,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   </div>
                   <div className="relative">
                     <input
+                      id="wet-feed-rate-input"
+                      name="feedRate"
+                      aria-label="Wet Cassava Feed Rate"
                       type="number"
                       min={0.01}
                       step={capacityInputUnit === 'tonne_h' ? 0.05 : capacityInputUnit === 'tonne_day' ? 0.5 : 1}
@@ -676,10 +688,13 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
 
               {/* Flash Tube Routing Configuration */}
               <div>
-                <label className="text-xs font-semibold text-slate-700 block mb-1">
+                <label htmlFor="tube-routing-layout-select" className="text-xs font-semibold text-slate-700 block mb-1">
                   Piping Routing Configuration
                 </label>
                 <select
+                  id="tube-routing-layout-select"
+                  name="tubeRoutingLayout"
+                  aria-label="Piping Routing Configuration"
                   value={inputs.tubeRoutingLayout || 'single_loop'}
                   onChange={(e) => update('tubeRoutingLayout', e.target.value as any)}
                   className="w-full px-3 py-2 text-xs font-bold border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-emerald-500"
@@ -783,8 +798,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                 </div>
 
                 <div className="space-y-2">
-                  <label className="flex items-start gap-2.5 p-2.5 rounded-lg border border-slate-200 bg-white cursor-pointer hover:border-slate-300">
+                  <label htmlFor="methodology-cirad" className="flex items-start gap-2.5 p-2.5 rounded-lg border border-slate-200 bg-white cursor-pointer hover:border-slate-300">
                     <input
+                      id="methodology-cirad"
                       type="radio"
                       name="methodology"
                       checked={inputs.methodology === 'cirad'}
@@ -801,8 +817,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                     </div>
                   </label>
 
-                  <label className="flex items-start gap-2.5 p-2.5 rounded-lg border border-slate-200 bg-white cursor-pointer hover:border-slate-300">
+                  <label htmlFor="methodology-kuye" className="flex items-start gap-2.5 p-2.5 rounded-lg border border-slate-200 bg-white cursor-pointer hover:border-slate-300">
                     <input
+                      id="methodology-kuye"
                       type="radio"
                       name="methodology"
                       checked={inputs.methodology === 'kuye'}
@@ -960,7 +977,7 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                   {/* Number of Passes */}
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-xs font-semibold text-slate-700">
+                      <label htmlFor="heat-exchanger-passes-input" className="text-xs font-semibold text-slate-700">
                         Specified Number of Passes (N_pass)
                       </label>
                       <span className="text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.2 rounded">
@@ -969,6 +986,9 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
                     </div>
                     <div className="relative">
                       <input
+                        id="heat-exchanger-passes-input"
+                        name="heatExchangerPasses"
+                        aria-label="Specified Number of Passes"
                         type="number"
                         min={1}
                         max={8}
@@ -1002,10 +1022,13 @@ export const InputPanel: React.FC<InputPanelProps> = ({ inputs, onChange, onOpen
 
                   {/* Heat Exchanger Construction Type */}
                   <div>
-                    <label className="text-xs font-semibold text-slate-700 block mb-1">
+                    <label htmlFor="heat-exchanger-type-select" className="text-xs font-semibold text-slate-700 block mb-1">
                       Heat Exchanger Construction Type
                     </label>
                     <select
+                      id="heat-exchanger-type-select"
+                      name="heatExchangerType"
+                      aria-label="Heat Exchanger Construction Type"
                       value={inputs.heatExchangerType || 'cross_flow_finned'}
                       onChange={(e) => update('heatExchangerType', e.target.value as any)}
                       className="w-full px-3 py-2 text-xs font-bold border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-emerald-500"

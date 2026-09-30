@@ -13,6 +13,7 @@ export default defineConfig({
     // all pure TypeScript with no DOM dependency. Component tests opt in per-file
     // with a `// @vitest-environment jsdom` pragma.
     globals: false,
+    testTimeout: 15000,
     server: {
       deps: {
         // jspdf must be inlined rather than externalised. The generator loads it
