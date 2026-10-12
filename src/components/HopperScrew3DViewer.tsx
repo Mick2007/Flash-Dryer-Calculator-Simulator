@@ -59,8 +59,13 @@ export const HopperScrew3DViewer: React.FC<HopperScrew3DViewerProps> = ({
   const H = hopperDesign.overallHeightM; // h1 + h2
 
   // Angles
-  const angleA = hopperDesign.wallSlopeAngleADeg; // Side Wall Angle (Width)
-  const angleB = hopperDesign.wallSlopeAngleBDeg; // End Wall Angle (Length)
+  // A is the SIDE wall: a left/right panel, so its horizontal offset is along the
+  // length and its slope is set by Run_L. B is the END wall: a front/back panel,
+  // offset along the width, slope set by Run_W. In the mesh below the panels whose
+  // top-to-bottom offset is in Z (the length axis) are the side walls, and those
+  // offset in X (the width axis) are the end walls.
+  const angleA = hopperDesign.wallSlopeAngleADeg; // Side Wall Angle (Length direction)
+  const angleB = hopperDesign.wallSlopeAngleBDeg; // End Wall Angle (Width direction)
   const angleC = hopperDesign.valleyAngleDeg; // Valley Corner Angle
   const isSteep = hopperDesign.isValleyAngleSufficient;
 
@@ -310,15 +315,17 @@ export const HopperScrew3DViewer: React.FC<HopperScrew3DViewerProps> = ({
     const l2h = L2 / 2;
 
     const frustumVertices = new Float32Array([
-      // Front Wall (+Z): Vertices 1, 0, 4, 5
+      // End Wall (+Z): Vertices 1, 0, 4, 5
+      // Front/back panel: top edge spans the width, offset in X = Run_W.
       -w1h, h2,  l1h,    w1h, h2,  l1h,    w2h,  0,  l2h,
       -w1h, h2,  l1h,    w2h,  0,  l2h,   -w2h,  0,  l2h,
 
-      // Back Wall (-Z): Vertices 3, 2, 6, 7
+      // End Wall (-Z): Vertices 3, 2, 6, 7
        w1h, h2, -l1h,   -w1h, h2, -l1h,   -w2h,  0, -l2h,
        w1h, h2, -l1h,   -w2h,  0, -l2h,    w2h,  0, -l2h,
 
       // Right Side Wall (+X): Vertices 0, 3, 7, 4
+      // Left/right panel: top edge spans the length, offset in Z = Run_L.
        w1h, h2,  l1h,    w1h, h2, -l1h,    w2h,  0, -l2h,
        w1h, h2,  l1h,    w2h,  0, -l2h,    w2h,  0,  l2h,
 
@@ -371,16 +378,16 @@ export const HopperScrew3DViewer: React.FC<HopperScrew3DViewerProps> = ({
       const ml1h = mashTopL / 2;
 
       const mashVertices = new Float32Array([
-        // Front Wall
+        // End Wall (+Z)
         -mw1h, mashH,  ml1h,    mw1h, mashH,  ml1h,    w2h,  0.02,  l2h,
         -mw1h, mashH,  ml1h,    w2h,  0.02,  l2h,   -w2h,  0.02,  l2h,
-        // Back Wall
+        // End Wall (-Z)
          mw1h, mashH, -ml1h,   -mw1h, mashH, -ml1h,   -w2h,  0.02, -l2h,
          mw1h, mashH, -ml1h,   -w2h,  0.02, -l2h,    w2h,  0.02, -l2h,
-        // Right Side Wall
+        // Right Side Wall (+X)
          mw1h, mashH,  ml1h,    mw1h, mashH, -ml1h,    w2h,  0.02, -l2h,
          mw1h, mashH,  ml1h,    w2h,  0.02, -l2h,    w2h,  0.02,  l2h,
-        // Left Side Wall
+        // Left Side Wall (-X)
         -mw1h, mashH, -ml1h,   -mw1h, mashH,  ml1h,   -w2h,  0.02,  l2h,
         -mw1h, mashH, -ml1h,   -w2h,  0.02,  l2h,   -w2h,  0.02, -l2h,
         // Top Surface (Horizontal freeboard top)
@@ -509,10 +516,12 @@ export const HopperScrew3DViewer: React.FC<HopperScrew3DViewerProps> = ({
     if (preset === 'iso') {
       camera.position.set(1.4, 1.1, 1.6);
     } else if (preset === 'front') {
-      // Front View looking along Z (Width Direction - shows Side Wall Angle A)
+      // Front View looking along -Z. Sees the end wall, whose offset is in X
+      // (the width axis), so this view shows End Wall Angle B.
       camera.position.set(0, h2 / 2, 1.9);
     } else if (preset === 'side') {
-      // Side View looking along X (Length Direction - shows End Wall Angle B)
+      // Side View looking along -X. Sees the side wall, whose offset is in Z
+      // (the length axis), so this view shows Side Wall Angle A.
       camera.position.set(1.9, h2 / 2, 0);
     } else if (preset === 'top') {
       // Top Plan View
@@ -561,17 +570,17 @@ export const HopperScrew3DViewer: React.FC<HopperScrew3DViewerProps> = ({
               type="button"
               onClick={() => handlePreset('front')}
               className={`px-2.5 py-1 rounded transition-colors ${cameraPreset === 'front' ? 'bg-sky-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'}`}
-              title="Front View (Shows Side Wall Angle A)"
+              title="Front View (Shows End Wall Angle B)"
             >
-              Front (Angle A)
+              Front (Angle B)
             </button>
             <button
               type="button"
               onClick={() => handlePreset('side')}
               className={`px-2.5 py-1 rounded transition-colors ${cameraPreset === 'side' ? 'bg-sky-600 text-white font-bold' : 'text-slate-400 hover:text-slate-200'}`}
-              title="Side View (Shows End Wall Angle B)"
+              title="Side View (Shows Side Wall Angle A)"
             >
-              Side (Angle B)
+              Side (Angle A)
             </button>
             <button
               type="button"
@@ -651,7 +660,7 @@ export const HopperScrew3DViewer: React.FC<HopperScrew3DViewerProps> = ({
           <div className="flex items-center justify-between text-[11px]">
             <div>
               <span className="text-slate-300 font-bold block">Side Slope (Angle A)</span>
-              <span className="text-[10px] text-slate-500 font-mono">arctan(h2 / Run_W)</span>
+              <span className="text-[10px] text-slate-500 font-mono">arctan(h2 / Run_L)</span>
             </div>
             <span className="font-mono font-black text-sky-400 text-sm">
               {angleA}&deg;
@@ -662,7 +671,7 @@ export const HopperScrew3DViewer: React.FC<HopperScrew3DViewerProps> = ({
           <div className="flex items-center justify-between text-[11px]">
             <div>
               <span className="text-slate-300 font-bold block">End Slope (Angle B)</span>
-              <span className="text-[10px] text-slate-500 font-mono">arctan(h2 / Run_L)</span>
+              <span className="text-[10px] text-slate-500 font-mono">arctan(h2 / Run_W)</span>
             </div>
             <span className="font-mono font-black text-sky-400 text-sm">
               {angleB}&deg;

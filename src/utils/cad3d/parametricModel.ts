@@ -30,6 +30,9 @@ export interface ParametricModel3D {
   upstreamBlowerPosition: { x: number; y: number; z: number };
   upstreamBlowerVoluteRadiusM: number;
   upstreamBlowerWidthM: number;
+  /** Discharge nozzle, sized from the duct area. See ITEM 30. */
+  upstreamBlowerOutletWidthM: number;
+  upstreamBlowerOutletHeightM: number;
   upstreamBlowerMotorRadiusM: number;
   upstreamBlowerMotorLengthM: number;
   upstreamBlowerSkidHeightM: number;
@@ -39,6 +42,24 @@ export interface ParametricModel3D {
   downstreamBlowerInletRadiusM: number;
   downstreamBlowerOutletWidthM: number;
   downstreamBlowerOutletHeightM: number;
+  /**
+   * Clean-air exhaust stack radius, m. An equal-area round section on the fan
+   * discharge.
+   *
+   * Sized HERE rather than in the geometry builder so the clearance between the stack
+   * and the overhead suction duct can be asserted numerically. The builder used to
+   * derive this from `cycloneVortexFinderRadiusM`, an upstream component with no
+   * dimensional relationship to the fan. See ITEM 33.
+   */
+  downstreamStackRadiusM: number;
+  /**
+   * Length of the concentric reducer between the outlet duct and the fan suction throat, m.
+   *
+   * REQUIRED, not cosmetic: the duct is 0.579 m and the throat 0.433 m at the IITA load,
+   * so the duct overhangs the opening by 146 mm in diameter and cannot enter it. See
+   * ITEM 40.
+   */
+  idSuctionReducerLengthM: number;
   downstreamBlowerMotorRadiusM: number;
   downstreamBlowerMotorLengthM: number;
   downstreamBlowerSkidHeightM: number;
@@ -63,6 +84,26 @@ export interface ParametricModel3D {
   loopOffsetZM: number;
   pipeCenterlineLengthM: number;
   pipeLengthDifferencePercent: number;
+  /**
+   * Solved horizontal run inserted at the top of the loop, m.
+   *
+   * THIS IS THE AUTHORITATIVE VALUE. The geometry builder previously rebuilt the
+   * downcomer at `riserBaseX`, ignoring the run entirely, while this module's
+   * own centreline used `downcomerX = riserX + horizontalRunM`. The two disagreed
+   * by up to 1.5 m, so the physical pipe and the length the engine was costed
+   * were different machines, and the run that the engine's `seg-loop-straight`
+   * segment paid for was never drawn.
+   */
+  horizontalRunM: number;
+  /** X of the vertical downcomer. Equals riserX + horizontalRunM. */
+  downcomerXM: number;
+  /** Y at which the downcomer turns toward the cyclone inlet. */
+  downcomerExitYM: number;
+  /**
+   * Routing layout actually realised. `straight_riser` means the downcomer
+   * shares the riser's X, so the only offset is the riser's own plan position.
+   */
+  routingLayout: 'single_loop' | 'double_loop' | 'straight_riser';
 
   // Cyclone Separator (Anchored to maintain ground clearance)
   isStairmand: boolean;
@@ -77,6 +118,24 @@ export interface ParametricModel3D {
   cycloneInletHeightM: number;
   cycloneInletWidthM: number;
   cycloneInletLengthM: number;
+  /**
+   * Length of the round-to-rectangular transition between the flash duct and the
+   * tangential inlet, m.
+   *
+   * REQUIRED, not cosmetic. The duct is a user-chosen round standard size and the
+   * cyclone's tangential inlet is 0.2 Dc x 0.5 Dc, so the two sections disagree — at
+   * the IITA load the duct is 450 mm round and the inlet is 231 x 579 mm. Something has
+   * to carry the section from one to the other, and it has to arrive exactly on the
+   * inlet rectangle. See ITEM 37.
+   */
+  cycloneInletTransitionLengthM: number;
+  /**
+   * Tangential stub that actually projects into the barrel, m.
+   *
+   * `cycloneInletLengthM` is the flange-to-barrel-centre spacing; the transition takes
+   * its share of that, and the remainder is the nozzle inside the shell.
+   */
+  cycloneInletStubLengthM: number;
   cycloneCenterXM: number;
   cycloneJunctionYM: number;
   cycloneCenterZM: number;
@@ -168,6 +227,52 @@ export interface ParametricModel3D {
 }
 
 /**
+ * Geometry-level faults that the port-to-port check cannot see, keyed by joint id.
+ *
+ * ITEM 39. `validateAssemblyConnections` compares two DECLARED ports. Both the flash
+ * tube outlet port and the cyclone inlet port are derived from the same model
+ * quantities, so they agree by construction and the joint reports 0.00 mm and CONNECTED
+ * even when the builder has stopped drawing the connection at all.
+ *
+ * That is exactly what happened to the tangential inlet: once the transition needed more
+ * room than the flange standoff allowed, `cycloneInletStubLengthM` clamped to zero and the
+ * builder skipped the stub and its flange plate, so the rectangular nozzle vanished from
+ * the model while the checker stayed green.
+ *
+ * These checks are on the quantities the builder actually places geometry from, so they
+ * fail when the drawn connection is missing, oversized or unreachable.
+ */
+function geometryIssuesFor(
+  jointId: string,
+  model?: ParametricModel3D
+): string[] {
+  if (!model || jointId !== 'joint_flashtube_cyclone') return [];
+  const issues: string[] = [];
+
+  const shellX = model.cycloneCenterXM - model.cycloneBarrelRadiusM;
+  const flangeX = model.cycloneInletFlangePoint.x;
+  const stubOuterX = flangeX + model.cycloneInletTransitionLengthM;
+  const stubInnerX = stubOuterX + model.cycloneInletStubLengthM;
+
+  if (model.cycloneInletStubLengthM <= 0) {
+    issues.push(
+      `tangential inlet stub is ${model.cycloneInletStubLengthM.toFixed(3)} m — the rectangular nozzle is not drawn at all`
+    );
+  }
+  if (stubOuterX > shellX) {
+    issues.push(
+      `transition (${model.cycloneInletTransitionLengthM.toFixed(3)} m) overruns the flange-to-shell run by ${((stubOuterX - shellX) * 1000).toFixed(0)} mm, so there is no outside run for it`
+    );
+  }
+  if (stubInnerX <= shellX) {
+    issues.push(
+      `inlet never reaches the barrel: stub ends ${((shellX - stubInnerX) * 1000).toFixed(0)} mm short of the shell`
+    );
+  }
+  return issues;
+}
+
+/**
  * Validates kinematic port connections across the entire 3D mechanical assembly.
  * Checks:
  * - gap <= 0.5 mm
@@ -182,6 +287,7 @@ export function validateAssemblyConnections(
   let connections: AssemblyConnection[] = [];
   let portsByName: Record<string, ConnectionPort> | undefined;
   let connectors: AssemblyConnector[] | undefined;
+  let modelRef: ParametricModel3D | undefined;
 
   if (Array.isArray(input)) {
     connections = input;
@@ -189,6 +295,12 @@ export function validateAssemblyConnections(
     connections = input.connections || [];
     portsByName = input.portsByName;
     connectors = input.connectors;
+    // ITEM 39 — only treat the input as a model if it really is one. The builder's first
+    // pass hands in `{ connections, portsByName, connectors }`, which has none of the
+    // geometry fields; casting that blindly made the checks below read undefined.
+    if (typeof (input as ParametricModel3D).cycloneCenterXM === 'number') {
+      modelRef = input as ParametricModel3D;
+    }
   }
 
   const reports: JointValidationReport[] = connections.map((conn) => {
@@ -220,8 +332,14 @@ export function validateAssemblyConnections(
     const hasPositiveConnector = connectorLengthM > 0.001;
     const portsExist = !portsByName || (!!fromPort && !!toPort);
 
-    // Pass tolerance strictly <= 0.5 mm and <= 0.5°
-    const passed = gapMm <= 0.5 && angleDeg <= 0.5 && portsExist && hasPositiveConnector;
+    // ITEM 39 — port agreement is necessary but not sufficient. The port-to-port check
+    // cannot see whether the builder drew the connection at all, so the geometry the
+    // pieces are placed from is checked too.
+    const geometryIssues = geometryIssuesFor(conn.id, modelRef);
+    const geometryOk = geometryIssues.length === 0;
+
+    // Pass tolerance strictly <= 0.5 mm and <= 0.5 deg
+    const passed = gapMm <= 0.5 && angleDeg <= 0.5 && portsExist && hasPositiveConnector && geometryOk;
 
     return {
       jointId: conn.id,
@@ -236,7 +354,9 @@ export function validateAssemblyConnections(
       status: passed ? 'CONNECTED' : 'FAILED',
       connectorLengthM: Math.round(connectorLengthM * 1000) / 1000,
       passed,
-      notes: conn.notes || conn.description,
+      notes: geometryIssues.length
+        ? `${conn.notes || conn.description || ''} | geometry: ${geometryIssues.join('; ')}`.trim()
+        : conn.notes || conn.description,
       position: fromPort?.position,
     };
   });
@@ -350,11 +470,13 @@ export function extractParametricModel(results: CalculationResults): ParametricM
   const flangeRadiusM = pipeRadiusM * 1.55;
   const flangeThicknessM = Math.max(0.016, pipeRadiusM * 0.045);
 
-  const riserHeightM =
+  // Let the riser be extended later, to absorb any length the layout cannot take in
+  // a horizontal run. Declared `let` because item 27 raises it for straight_riser.
+  let riserHeightM =
     Number.isFinite(dimensions?.verticalColumnHeightM) && dimensions.verticalColumnHeightM >= 3.0
       ? dimensions.verticalColumnHeightM
       : 7.0;
-  const totalLengthM =
+  let totalLengthM =
     Number.isFinite(dimensions?.totalPipeLengthM) && dimensions.totalPipeLengthM >= riserHeightM
       ? dimensions.totalPipeLengthM
       : Math.max(20.0, riserHeightM * 2.2);
@@ -381,11 +503,17 @@ export function extractParametricModel(results: CalculationResults): ParametricM
       : Math.max(0.40, pipeRadiusM * 2.0); // fallback: long-radius 2 D elbow
   const loopOffsetZM = -bendRadiusM * 2.0;
 
+  // Duct cross-sectional area. Declared here because both blower discharge nozzles
+  // are sized from it (see ITEM 30) and they are computed above the elevation block.
+  const ductAreaM2 = Math.PI * pipeRadiusM * pipeRadiusM;
+
   // Consistent Centerline Elevation Logic:
   // Must provide floor clearance for heater, flanges, and piping at all nominal diameters
   const ductCenterlineYM = Math.max(1.25, pipeRadiusM + 0.85);
   const riserBaseYM = ductCenterlineYM + bendRadiusM;
-  const riserTopYM = riserBaseYM + riserHeightM;
+  // `riserTopYM` is recomputed after the run solve, because item 27 may raise the
+  // riser to absorb length that the layout cannot take sideways.
+  let riserTopYM = riserBaseYM + riserHeightM;
 
   // 3. Pressure System Architecture
   const pressureMode: PressureSystemType =
@@ -410,8 +538,13 @@ export function extractParametricModel(results: CalculationResults): ParametricM
   const upstreamBlowerVoluteRadiusM = Math.max(0.36, 0.30 + Math.sqrt(upstreamBlowerPowerKW) * 0.045 + pipeRadiusM * 0.2);
   const upstreamBlowerWidthM = Math.max(0.28, upstreamBlowerVoluteRadiusM * 0.65);
   const upstreamBlowerInletRadiusM = upstreamBlowerVoluteRadiusM * 0.45;
-  const upstreamBlowerOutletWidthM = upstreamBlowerVoluteRadiusM * 0.45;
-  const upstreamBlowerOutletHeightM = upstreamBlowerVoluteRadiusM * 0.55;
+  // Same duct-derived discharge nozzle as the downstream fan. See the note there.
+  const upstreamNozzleAreaM2 = ductAreaM2 * 1.15;
+  const upstreamBlowerOutletWidthM = Math.max(pipeRadiusM * 1.6, Math.sqrt(upstreamNozzleAreaM2));
+  const upstreamBlowerOutletHeightM = Math.max(
+    pipeRadiusM * 1.6,
+    upstreamNozzleAreaM2 / upstreamBlowerOutletWidthM
+  );
   const upstreamBlowerMotorRadiusM = upstreamBlowerVoluteRadiusM * 0.32;
   const upstreamBlowerMotorLengthM = upstreamBlowerVoluteRadiusM * 0.8;
   const upstreamBlowerSkidHeightM = 0.15;
@@ -487,6 +620,30 @@ export function extractParametricModel(results: CalculationResults): ParametricM
   const riserX = venturiOutletX + bendRadiusM;
   const downcomerZ = loopOffsetZM; // -2 * bendRadiusM
 
+  // ITEM 27 — the plan offset of the downcomer IS the horizontal run, and nothing else.
+  //
+  // An earlier attempt added a separate `layoutPlanOffsetM` on top of the run. That
+  // double-counted the displacement: the run already moves the downcomer in X, so a
+  // second offset on top of it pushed the downcomer downstream of the cyclone it was
+  // meant to feed.
+  //
+  // There is exactly one X displacement in this routing, and it is the run:
+  //
+  //     riser -> U-bend (pure Z-Y arc, no X change)
+  //          -> horizontal run  (the ONLY X displacement, = runX)
+  //          -> downcomer (vertical)
+  //          -> fixed elbow + fixed inlet spool into the tangential flange
+  //
+  // `straight_riser` is then simply the case where that run is zero, which puts the
+  // riser and the downcomer on one vertical centreline with a pure 180° return — the
+  // "U-turn is straight" arrangement. `routingLayout` was previously read from the
+  // inputs and then never branched on, so every layout drew the same bent return and
+  // the option appeared to do nothing. The layout now CAPS the run, which is what
+  // actually distinguishes the three options.
+  //
+  // The cap is expressed as a fraction of the riser height rather than an absolute,
+  // so it scales with the machine instead of being a fixed number of metres.
+
   // 10. Cyclone Separator (Strictly Sized & Grounded)
   const isStairmand = (dimensions?.cycloneType ?? inputs?.cycloneType ?? 'stairmand') === 'stairmand';
   const rawCycloneDiameterMm =
@@ -524,7 +681,60 @@ export function extractParametricModel(results: CalculationResults): ParametricM
     Number.isFinite(dimensions?.cycloneInletWidthMm) && dimensions.cycloneInletWidthMm > 0
       ? dimensions.cycloneInletWidthMm / 1000
       : cycloneBarrelRadiusM * 2 * (isStairmand ? 0.2 : 0.25);
-  const cycloneInletLengthM = cycloneBarrelRadiusM * 1.5;
+  // ITEM 39 — the tangential inlet needs the transition to FIT OUTSIDE the barrel, with a
+  // stub left to carry it through the shell.
+  //
+  // `cycloneInletLengthM` used to be `barrelRadiusM * 1.5`, which put the flange a fixed
+  // half-barrel-radius OUTSIDE the shell and then asked the transition to fit in that
+  // space. On a 450 mm duct it just about managed (0.274 m of transition into 0.289 m of
+  // room); on a 1000 mm duct it wanted 0.961 m into the same 0.289 m and did not fit.
+  //
+  // When it did not fit, the old code clamped the stub to zero:
+  //
+  //     stubLen = max(0, min(stubInnerTarget - stubOuter, -stubOuter))
+  //
+  // and the builder SKIPS the stub and its flange plate when stubLen is zero. So the
+  // rectangular tangential inlet simply stopped being drawn — the connection the user was
+  // looking at ceased to exist — while `validateAssemblyConnections` went on reporting
+  // 0.00 mm and CONNECTED, because it only ever compared the two declared ports and never
+  // looked at a drawn vertex.
+  //
+  // The standoff is now DERIVED from the transition it has to host: the flange sits far
+  // enough outside the shell that the 1:2.5 transition always fits with room to spare,
+  // and the stub is then whatever is left plus the shell penetration. That makes a
+  // positive stub and a positive penetration a consequence of the sizing rather than
+  // something that has to be clamped back into existence.
+  const inletHalfHeightM = cycloneInletHeightM / 2;
+  const inletHalfWidthM = cycloneInletWidthM / 2;
+  const ductOuterRadiusM = pipeRadiusM;
+  // Length the transition needs at a 1:2.5 wall angle (~22 deg, the usual limit for a
+  // spun or flued sheet-metal transition), driven by the LARGER half-dimension change.
+  const inletWallAngleLengthM =
+    2.5 * Math.max(
+      Math.abs(ductOuterRadiusM - inletHalfHeightM),
+      Math.abs(ductOuterRadiusM - inletHalfWidthM)
+    );
+  // How far the tangential nozzle must project past the shell to read as an inlet.
+  // Measured from the shell, not from the barrel centre.
+  const inletPenetrationM = Math.min(0.15, cycloneBarrelRadiusM / 2);
+  // Flange standoff from the shell. 0.75 leaves a quarter of the outside run for the
+  // stub, so the stub cannot be squeezed out.
+  const inletFlangeStandOffM = Math.max(inletWallAngleLengthM / 0.75, 0.25);
+  // Flange to barrel centre, so the barrel still sits one inlet length beyond the flange
+  // and the existing `inletGap === bendRadius + inletLength` invariant still holds.
+  const cycloneInletLengthM = cycloneBarrelRadiusM + inletFlangeStandOffM;
+  const cycloneInletTransitionLengthM = inletWallAngleLengthM;
+  const cycloneInletStubLengthM = inletFlangeStandOffM + inletPenetrationM - cycloneInletTransitionLengthM;
+
+  // The transition itself — a REAL one, landing exactly on the inlet rectangle — is
+  // specified in ITEM 39 above, together with the standoff that hosts it. What is easy to
+  // get wrong and worth restating here: the duct and the inlet are sized independently
+  // and they do NOT match. On the IITA load the duct is 450 mm round and the tangential
+  // inlet is 231 x 579 mm. The Stairmand/Lapple inlet proportions are correct cyclone
+  // design and stay; the duct is a user-chosen standard size; the transition absorbs the
+  // difference. Sizing the transition off only the half-WIDTH change would put a 1:1.7
+  // wall on the converging side at narrow inlets, which is not buildable, so it is driven
+  // by the larger of the two.
 
   // 11. Rotary Airlock Valve & Ground Clearance
   const clearanceBelowAirlockM = 0.45;
@@ -550,8 +760,172 @@ export function extractParametricModel(results: CalculationResults): ParametricM
   // perfectly coincides with downcomerZ (-2 * bendRadiusM)
   const cycloneCenterZM = downcomerZ - cycloneBarrelRadiusM + cycloneInletWidthM / 2;
 
-  const minClearanceX = Math.max(1.8, bendRadiusM + pipeRadiusM + cycloneBarrelRadiusM + 0.6);
-  const cycloneCenterXM = riserX + minClearanceX;
+  // ITEM 27 — the inlet transition is a FIXED quarter elbow, not a spool.
+  //
+  // It is sized from the bend radius only, deliberately NOT from the cyclone
+  // diameter: anchoring the cyclone to a clearance that included the barrel radius
+  // made the barrel slide sideways whenever the cyclone was resized, which changed
+  // the transition length, which changed the solved run, which moved the downcomer.
+  // Every input tweak reshuffled the inlet.
+  //
+  // The cyclone's X is assigned AFTER the run is solved, below, so the chain is
+  // strictly one-directional:
+  //
+  //     riser -> U-bend -> [ run ] -> downcomer -> [ quarter elbow ] -> inlet
+  //
+  // and nothing reads the cyclone back into the run. That removes what would
+  // otherwise be a cycle, since downcomerX is needed to place the cyclone and the
+  // run is needed to place the downcomer.
+
+  // ITEM 36 — the downcomer exit is placed from the elbow's REACH, with no floor.
+  //
+  // The exit must sit exactly one bend radius above the inlet centreline, because the
+  // inlet elbow's reach is also exactly one bend radius. With both equal the elbow is
+  // a clean quarter circle: no straight lead-in, no straight run, tangent-continuous
+  // into the downcomer above and square onto the tangential inlet below.
+  //
+  // This was `Math.max(cycloneInletYM + bendRadiusM, 3.2)`. The floor is a latent
+  // version of the same bug this line already guards against in the other direction:
+  // a short inlet for a small cyclone would be silently overridden, `downcomerExitYM`
+  // would report the floored value, and the drawn rise would stop matching the reach,
+  // reintroducing a lead-in that pushes the elbow off the duct axis.
+  //
+  // It is worth being precise about the floor's actual reach: it is DEAD CODE. Across
+  // pipe diameters 80-1000 mm and feed rates 0.2-60 t/h the smallest value of
+  // `inletYM + bendRadiusM` is 5.572 m, so the 3.2 m clamp never fires on anything the
+  // app can produce. Removing it changes no output; it makes the quarter-circle
+  // invariant unconditional instead of conditional, and leaves nothing to mislead the
+  // next reader into believing a floor is load-bearing.
+  //
+  // An earlier note here blamed the inlet centre sitting below the barrel top for a
+  // visible 29 mm misalignment at the flange. That was wrong — it measured
+  // `cycloneBarrelTopYM` where the code reads `cycloneInletYM`, making the rise look
+  // like 1.2295 m instead of 0.900 m. At the IITA load reach and rise were, and still
+  // are, both exactly 0.900 m. The misalignment was in the BUILDER's control points;
+  // see ITEM 36 in geometryBuilder.ts.
+  const inletElbowReachM = bendRadiusM;
+  const downcomerExitY = cycloneInletYM + inletElbowReachM;
+
+  // ---- SOLVE THE HORIZONTAL RUN (hoisted above the cyclone anchor) -------------
+  //
+  // ITEM 16 / ITEM 27. The engine's developed length puts only the column height in
+  // the riser and the balance in a horizontal spool, so the 3D model has to
+  // reproduce that spool or it is not the machine being costed. Earlier this was
+  // solved with a bisection because the transition into the cyclone shrank as the
+  // run grew, making the objective nonlinear.
+  //
+  // It is hoisted above the cyclone anchor because the anchor is now derived FROM
+  // the downcomer, and the downcomer from the run. Solving the run after placing the
+  // cyclone would make the two mutually dependent.
+  //
+  // With a fixed inlet transition the objective is linear — a metre of run is a
+  // metre of pipe — so this is a subtraction and a clamp, not an iteration.
+  const l_base_elbow_est = (Math.PI / 2) * bendRadiusM;
+  const l_riser_est = riserHeightM;
+  const l_top_ubend_est = Math.PI * bendRadiusM;
+  const l_downcomer_est = riserTopYM - downcomerExitY;
+  const l_venturi_duct_est = venturiDivLengthM + venturiConvLengthM + venturiThroatLengthM + hotAirDuctLengthM;
+  // The turn from the downcomer's vertical run into the tangential inlet.
+  //
+  // With the flange one bend radius downstream and the exit one bend radius above the
+  // inlet (both established above), the elbow consumes the ENTIRE turn: a single
+  // quarter circle, with no straight lead-in and no straight run. So the transition
+  // length is exactly one quarter arc.
+  //
+  // An earlier version charged a full elbow PLUS a separate spool here, which
+  // overcounted the transition by 1.35 m at the default design — the model claimed
+  // more pipe between the downcomer and the cyclone than the drawn geometry contains.
+  const l_inlet_transition_est = (Math.PI / 2) * bendRadiusM;
+
+  const lengthExcludingRunAndTransition =
+    l_base_elbow_est +
+    l_riser_est +
+    l_top_ubend_est +
+    l_downcomer_est +
+    l_venturi_duct_est +
+    l_inlet_transition_est;
+
+  const runDeficitM = totalLengthM - lengthExcludingRunAndTransition;
+
+  // LAYOUT CAP — this is what finally makes `routingLayout` mean something.
+  //   straight_riser — no run at all, so the return is a pure 180° bend and the
+  //                   riser and downcomer share one vertical centreline. This is the
+  //                   arrangement the user asked for.
+  //   single_loop    — a modest run.
+  //   double_loop    — a long run, twice the single-loop allowance.
+  // Caps scale with the riser height so they follow the machine rather than being a
+  // fixed number of metres.
+  const layoutRunCapFactor =
+    routingLayout === 'straight_riser' ? 0 : routingLayout === 'double_loop' ? 1.0 : 0.5;
+  const layoutRunCapM = riserHeightM * layoutRunCapFactor;
+
+  const horizontalRunM = Math.max(0, Math.min(Math.max(0, runDeficitM), layoutRunCapM));
+  const transitionLengthAt = (_runX: number): number => l_inlet_transition_est;
+
+  // Whatever the layout cap could not absorb — in EITHER direction — is taken by the
+  // riser, which is the one remaining degree of freedom.
+  //
+  // The engine's developed length is a hard requirement of item 16: the drawing must
+  // be the machine being costed. With the riser pinned by the engine's column height,
+  // two failures were possible and both occurred:
+  //
+  //   - a straight_riser caps the run at zero, so the routing fell SHORT of the target;
+  //   - a large cyclone makes the fixed elbow+spool generous enough that the routing
+  //     came out LONG, by 4-6% on the 2 and 3 t/h capacity cases.
+  //
+  // So the riser is adjusted in whichever direction is needed, by half the residual.
+  // HALF, because the downcomer descends from riserTopYM: moving riserTopYM by X
+  // changes the riser AND the return by X each, so one metre of riser change
+  // supplies or removes TWO metres of pipe.
+  //
+  // Physically this is the right place to spend the adjustment. A vertical column
+  // contributes to pressure drop only through its own friction, whereas the same
+  // metre spent sideways in a horizontal run adds bend losses and needs supports.
+  const runAfterCapM = horizontalRunM;
+  const residualM = totalLengthM - (lengthExcludingRunAndTransition + runAfterCapM);
+  if (Math.abs(residualM) > 0.001) {
+    // Floor the column so a large negative residual cannot drive the riser below a
+    // structurally sensible height. The residual then stays visible in
+    // pipeLengthDifferencePercent rather than being silently absorbed.
+    const MIN_RISER_HEIGHT_M = 3.0;
+    const nextRiserHeightM = Math.max(MIN_RISER_HEIGHT_M, riserHeightM + residualM / 2);
+    riserHeightM = nextRiserHeightM;
+    riserTopYM = riserBaseYM + riserHeightM;
+  }
+
+  const downcomerX = riserX + horizontalRunM;
+
+  // ITEM 32 — the cyclone hangs off the DOWNCOMER, with the inlet turned to face the
+  // duct.
+  //
+  // Two earlier anchors were both wrong in different ways:
+  //
+  //   riser + minClearance        let the solved run push the downcomer PAST the
+  //                               cyclone, so the duct fed it from behind (negative
+  //                               gap, -0.40 m at the default design).
+  //   downcomer + inletSpool      sized the spool from the pipe and bend while the
+  //                               barrel centre sat a further inletLength on, which
+  //                               left the flange 68 mm BEHIND the downcomer. The
+  //                               elbow then had to turn back on itself — the hook
+  //                               visible where the duct met the barrel.
+  //
+  // The flange must sit exactly ONE BEND RADIUS downstream, and the barrel centre one
+  // inlet length beyond that:
+  //
+  //     downcomer ──┐
+  //                 │  rise  = bendRadius  (downcomerExitY is inletYM + bendRadius)
+  //                 └──►  flange   advance = bendRadius
+  //                       ──► barrel centre   + cycloneInletLength
+  //
+  // Both axes of the turn are then consumed by the elbow itself, leaving NO straight
+  // lead-in and NO straight run: a single tangent-continuous quarter circle from the
+  // vertical downcomer to the horizontal tangential inlet. That is the compact
+  // arrangement, and it is why the two radii have to match — the exit elevation is
+  // derived from the same bend radius.
+  //
+  // The inlet stays tangential: the barrel centre in Z is already offset so the duct
+  // meets the shell on its tangent line, which is unchanged by this edit.
+  const cycloneCenterXM = downcomerX + bendRadiusM + cycloneInletLengthM;
 
   const airlockPosition = {
     x: cycloneCenterXM,
@@ -570,15 +944,80 @@ export function extractParametricModel(results: CalculationResults): ParametricM
   const downstreamBlowerVoluteRadiusM = Math.max(0.36, 0.30 + Math.sqrt(downstreamBlowerPowerKW) * 0.045 + pipeRadiusM * 0.2);
   const downstreamBlowerWidthM = Math.max(0.28, downstreamBlowerVoluteRadiusM * 0.65);
   const downstreamBlowerInletRadiusM = downstreamBlowerVoluteRadiusM * 0.45;
-  const downstreamBlowerOutletWidthM = downstreamBlowerVoluteRadiusM * 0.45;
-  const downstreamBlowerOutletHeightM = downstreamBlowerVoluteRadiusM * 0.55;
+
+  // ITEM 30 — the discharge nozzle is sized FROM THE DUCT, not from the volute.
+  //
+  // The outlet was `voluteRadius x 0.45` wide by `voluteRadius x 0.55` tall, which
+  // scales with the FAN rather than with the AIR. At the default 450 mm volute that
+  // is 203 x 248 mm = 0.050 m^2 against a 180 mm duct's 0.025 m^2 — the nozzle was
+  // 1.97x the area of the pipe it had to mate with. A discharge 2x oversized on
+  // area passes at half the duct velocity, so the drawn transition read as a
+  // sudden expansion and the connection could never look like it flowed.
+  //
+  // The nozzle area is now held to 1.15x the duct area (a normal discharge
+  // transition, slightly oversized to keep velocity up), and then made
+  // SQUARE-AROUND, which is how a fan discharge nozzle is actually specified. The
+  // aspect follows from the area and the volute width rather than being invented.
+  const nozzleAreaM2 = ductAreaM2 * 1.15;
+  const downstreamBlowerOutletWidthM = Math.max(pipeRadiusM * 1.6, Math.sqrt(nozzleAreaM2));
+  const downstreamBlowerOutletHeightM = Math.max(
+    pipeRadiusM * 1.6,
+    nozzleAreaM2 / downstreamBlowerOutletWidthM
+  );
   const downstreamBlowerMotorRadiusM = downstreamBlowerVoluteRadiusM * 0.32;
+  // ITEM 33 — the exhaust stack is an equal-area round section on the fan discharge.
+  // Equal area means the same mass flow at the same velocity, which is what makes it
+  // a correct discharge rather than an arbitrary size.
+  //
+  // NOTE: the stack itself is no longer drawn — the fan outlet was removed at the user's
+  // request. The radius is retained because it is a reportable quantity (the discharge
+  // area the fan is sized against) and `downstreamBlowerOutletWidthM/HeightM` remain the
+  // fan's own discharge port. Nothing in the 3D assembly places geometry from it.
+  const downstreamStackRadiusM = Math.max(0.10, Math.sqrt(nozzleAreaM2 / Math.PI));
+  // ITEM 40 — the reducer that lets the outlet duct enter the fan suction throat.
+  //
+  // The overhead duct is sized from the cyclone vortex finder (0.2895 m radius at the
+  // IITA load, giving a 0.579 m duct) while the fan suction throat is
+  // `downstreamBlowerVoluteRadiusM * 0.45` (0.2167 m, a 0.433 m opening). The duct
+  // overhung the throat by 146 mm in DIAMETER: it could not enter it.
+  //
+  // Both ends are round and coaxial, so the correct transition is a concentric cone and
+  // its length follows the same 1:2.5 wall rule used for the cyclone inlet transition
+  // (ITEM 37).
+  //
+  // There is no length cap now. `idSuctionStandoffM` used to bound this, because the duct
+  // had to turn from vertical into +Z to reach a nozzle standing off to one side, and
+  // that turn ate most of the available straight. The connection is now a plain vertical
+  // drop onto a nozzle sitting on TOP of the volute, so the run is the full height of the
+  // drop and the wall angle is the only limit.
+  const idSuctionReducerLengthM = Math.max(
+    0.06,
+    2.5 * Math.abs(cycloneVortexFinderRadiusM - downstreamBlowerInletRadiusM)
+  );
   const downstreamBlowerMotorLengthM = downstreamBlowerVoluteRadiusM * 0.8;
   const downstreamBlowerSkidHeightM = 0.15;
   const downstreamBlowerCenterYM = downstreamBlowerSkidHeightM + downstreamBlowerVoluteRadiusM;
 
   const downstreamBlowerPosition = {
-    x: cycloneCenterXM + Math.max(1.8, cycloneBarrelRadiusM + 1.2),
+    // ITEM 38 — the fan must stand far enough downstream for a TRUE 180 degree return
+    // bend.
+    //
+    // The cyclone outlet leaves the vortex finder travelling +Y and must arrive above
+    // the fan travelling −Y, so both legs are vertical and the return is a semicircle
+    // whose radius is exactly half the horizontal span between them:
+    //
+    //     R = |fanX - cycloneX| / 2
+    //
+    // For that to be a proper long-radius elbow, R must be at least bendRadiusM, i.e.
+    // the span must be at least 2 * bendRadiusM. The previous spacing,
+    // `max(1.8, cycloneBarrelRadiusM + 1.2)`, is a fixed metre figure with no relation
+    // to the engine's bend radius, and 27 of 81 swept input combinations violated it —
+    // worst case a span of 1.8 m needing R = 2.0 m, short by 1.1 m.
+    //
+    // The only way out of that is to move the fan. Shrinking R instead is what produced
+    // the shouldered arch: two tight bends unable to meet, so a straight had to be
+    // inserted across the top.
+    x: cycloneCenterXM + Math.max(2 * bendRadiusM, cycloneBarrelRadiusM + 1.2, 1.8),
     y: downstreamBlowerCenterYM,
     z: cycloneCenterZM,
   };
@@ -608,7 +1047,6 @@ export function extractParametricModel(results: CalculationResults): ParametricM
 
   // 15. Pipe Swept Centerline (100% continuous without breaks):
   const centerlinePoints: { x: number; y: number; z: number }[] = [];
-  const downcomerExitY = Math.max(cycloneInletYM + 0.35, 3.2);
 
   if (hasUpstreamBlower) {
     centerlinePoints.push({ x: upstreamBlowerPosition.x - upstreamBlowerVoluteRadiusM * 0.6, y: upstreamBlowerPosition.y, z: 0 });
@@ -667,69 +1105,24 @@ export function extractParametricModel(results: CalculationResults): ParametricM
   // adding the deficit would land back at the original total. The run is therefore
   // solved for, by bisection on
   //
-  //     runX + transitionLength(runX) = target - (everything else)
-  //
-  // The left side is monotonically increasing in runX — the run grows linearly
-  // while the transition shrinks by no more than the same amount, by the triangle
-  // inequality — so the bracket is unique and bisection cannot diverge or stall.
-  // Ten iterations give well under a millimetre.
-  const l_base_elbow_est = (Math.PI / 2) * bendRadiusM;
-  const l_riser_est = riserHeightM;
-  const l_top_ubend_est = Math.PI * bendRadiusM;
-  const l_downcomer_est = riserTopYM - downcomerExitY;
-  const l_venturi_duct_est = venturiDivLengthM + venturiConvLengthM + venturiThroatLengthM + hotAirDuctLengthM;
-  // Everything in the total that is not the horizontal run or the transition.
-  const lengthExcludingRunAndTransition =
-    l_base_elbow_est + l_riser_est + l_top_ubend_est + l_downcomer_est + l_venturi_duct_est;
+  // The run, its cap and the transition length are all solved further UP, next to
+  // next to the run solve, because the cyclone anchor below is derived from
+  // `downcomerX` and so cannot be placed before the run is known.
 
-  // Transition length as a function of how far the downcomer is offset in X.
-  const transitionLengthFor = (runX: number): number =>
-    Math.hypot(cycloneInletFlangePoint.x - (riserX + runX), cycloneInletYM - downcomerExitY);
-  // The portion of the total that the run and the transition must together supply.
-  //
-  // NOTE this is `runX + transition`, NOT the full total. An earlier version
-  // compared the FULL produced length against this partial target, so
-  // lengthExcludingRunAndTransition was counted on both sides. The bisection then
-  // saw an objective already far above target at every point, collapsed the
-  // bracket to zero, and silently added no run at all — which is why the centreline
-  // stayed at 18.82 m and the run appeared to do nothing.
-  const targetRemaining = totalLengthM - lengthExcludingRunAndTransition;
-  const runPlusTransition = (runX: number): number => runX + transitionLengthFor(runX);
-
-  // If the geometry already supplies the target without a run, leave the routing
-  // exactly as it was. This happens for a tall riser, where the engine's own
-  // layout also caps the riser at the column height.
-  let horizontalRunM = 0;
-  if (runPlusTransition(0) < targetRemaining - 0.01) {
-    // Bracket. runPlusTransition is monotonically increasing in runX: the run grows
-    // linearly and the transition shrinks by no more than the same amount, by the
-    // triangle inequality. So a bracket on the objective has exactly one root.
-    let lo = 0;
-    let hi = Math.max(0.1, targetRemaining);
-    for (let i = 0; i < 80; i++) {
-      const mid = (lo + hi) / 2;
-      if (runPlusTransition(mid) < targetRemaining) lo = mid;
-      else hi = mid;
-    }
-    horizontalRunM = (lo + hi) / 2;
-  }
-
-  const downcomerX = riserX + horizontalRunM;
-
-  // Horizontal run from the U-bend exit to the top of the downcomer. Two
-  // intermediate points so the pipe renders as a straight run rather than a single
-  // long segment.
+  // Horizontal run from the U-bend exit to the top of the downcomer. An
+  // intermediate point so it renders as a straight run rather than one long segment.
   if (horizontalRunM > 0.01) {
     centerlinePoints.push({ x: riserX + horizontalRunM * 0.5, y: riserTopYM, z: downcomerZ });
-    centerlinePoints.push({ x: downcomerX, y: riserTopYM, z: downcomerZ });
   }
+  centerlinePoints.push({ x: downcomerX, y: riserTopYM, z: downcomerZ });
 
   // Downcomer vertical descent
   centerlinePoints.push({ x: downcomerX, y: (riserTopYM + downcomerExitY) * 0.5, z: downcomerZ });
   centerlinePoints.push({ x: downcomerX, y: downcomerExitY, z: downcomerZ });
 
-  // Smooth horizontal transition entering cyclone tangential inlet flange
-  centerlinePoints.push({ x: (downcomerX + cycloneInletFlangePoint.x) * 0.5, y: (downcomerExitY + cycloneInletYM) * 0.5, z: downcomerZ });
+  // Transition into the cyclone tangential inlet. When the downcomer already sits
+  // on the inlet centreline there is no turn to make and the two points are the
+  // same; otherwise this is the diagonal leg.
   centerlinePoints.push({ x: cycloneInletFlangePoint.x, y: cycloneInletYM, z: downcomerZ });
 
   // Calculate true developed centerline length
@@ -738,7 +1131,7 @@ export function extractParametricModel(results: CalculationResults): ParametricM
   const l_top_ubend = Math.PI * bendRadiusM;
   const l_downcomer = riserTopYM - downcomerExitY;
   const l_horizontal_run = horizontalRunM;
-  const l_transition = transitionLengthFor(horizontalRunM);
+  const l_transition = transitionLengthAt(horizontalRunM);
   const l_venturi_duct = venturiDivLengthM + venturiConvLengthM + venturiThroatLengthM + hotAirDuctLengthM;
   const pipeCenterlineLengthM =
     Math.round(
@@ -1627,6 +2020,8 @@ export function extractParametricModel(results: CalculationResults): ParametricM
     upstreamBlowerPosition,
     upstreamBlowerVoluteRadiusM,
     upstreamBlowerWidthM,
+    upstreamBlowerOutletWidthM,
+    upstreamBlowerOutletHeightM,
     upstreamBlowerMotorRadiusM,
     upstreamBlowerMotorLengthM,
     upstreamBlowerSkidHeightM,
@@ -1636,6 +2031,8 @@ export function extractParametricModel(results: CalculationResults): ParametricM
     downstreamBlowerInletRadiusM,
     downstreamBlowerOutletWidthM,
     downstreamBlowerOutletHeightM,
+    downstreamStackRadiusM,
+    idSuctionReducerLengthM,
     downstreamBlowerMotorRadiusM,
     downstreamBlowerMotorLengthM,
     downstreamBlowerSkidHeightM,
@@ -1659,6 +2056,10 @@ export function extractParametricModel(results: CalculationResults): ParametricM
     loopOffsetZM,
     pipeCenterlineLengthM,
     pipeLengthDifferencePercent,
+    horizontalRunM,
+    downcomerXM: downcomerX,
+    downcomerExitYM: downcomerExitY,
+    routingLayout,
 
     isStairmand,
     cycloneBarrelRadiusM,
@@ -1672,6 +2073,8 @@ export function extractParametricModel(results: CalculationResults): ParametricM
     cycloneInletHeightM,
     cycloneInletWidthM,
     cycloneInletLengthM,
+    cycloneInletTransitionLengthM,
+    cycloneInletStubLengthM,
     cycloneCenterXM,
     cycloneJunctionYM,
     cycloneCenterZM,
@@ -1748,6 +2151,15 @@ export function extractParametricModel(results: CalculationResults): ParametricM
   const validation = validateParametricModel(model);
   model.isValid = validation.isValid;
   model.validationWarnings = validation.warnings;
+
+  // ITEM 39 — re-run the joint validation now that the model EXISTS, so the geometry
+  // checks are included.
+  //
+  // The first pass above runs before the model object is assembled and can only compare
+  // ports. That is the blindness the user reported: both the flash tube outlet port and
+  // the cyclone inlet port are derived from the same quantities, so they agreed at 0.00 mm
+  // and reported CONNECTED while the builder was not drawing the tangential inlet at all.
+  model.validationReport = validateAssemblyConnections(model);
 
   return model;
 }

@@ -71,8 +71,11 @@ export interface DryerInputs {
   hopperOutletLengthM?: number; // L2 (m), default 0.22 m
   hopperUpperHeightM?: number; // h1 (m), default 0.10 m
   hopperLowerHeightM?: number; // h2 (m), calculated ~0.556 m to match V_hopper or editable
-  hopperWallAngleADeg?: number; // Wall slope angle A (deg), default 76°
-  hopperWallAngleBDeg?: number; // Wall slope angle B (deg), default 81°
+  // Inert: declared for reference against the Kuye et al. (2011) drawing but never
+  // read by the engine. A and B are always computed from the hopper geometry, and
+  // these fields are echoed back unchanged, so setting them has no effect.
+  hopperWallAngleADeg?: number; // Reference side wall angle A (deg), default 76°
+  hopperWallAngleBDeg?: number; // Reference end wall angle B (deg), default 81°
 
   // Screw Feeder Engineering Inputs (IITA / Kuye et al. 2011 & Academia Reference)
   screwDiameterMm?: number; // screw diameter (mm), default 100 mm (4 in)
@@ -116,10 +119,10 @@ export interface HopperDesignReport {
   totalGeometricVolumeM3: number; // Vtotal = Vupper + Vlower (~0.1089 m³)
   overallHeightM: number; // h1 + h2 (~0.656 m)
   volumeMarginPercent: number;
-  runWidthM: number; // Run_W = (W1 - W2) / 2
-  runLengthM: number; // Run_L = (L1 - L2) / 2
-  wallSlopeAngleADeg: number; // Side wall angle A = arctan(h2 / Run_W)
-  wallSlopeAngleBDeg: number; // End wall angle B = arctan(h2 / Run_L)
+  runWidthM: number; // Run_W = (W1 - W2) / 2, the END wall horizontal offset
+  runLengthM: number; // Run_L = (L1 - L2) / 2, the SIDE wall horizontal offset
+  wallSlopeAngleADeg: number; // Side wall angle A = arctan(h2 / Run_L), Run_L = (L1 - L2) / 2
+  wallSlopeAngleBDeg: number; // End wall angle B = arctan(h2 / Run_W), Run_W = (W1 - W2) / 2
   valleyAngleDeg: number; // Corner valley angle C = arccot(sqrt(cot²A + cot²B))
   isValleyAngleSufficient: boolean; // Confirms C >= 70° standard for dewatered cassava mash
   flowRegimeDescription: string;
@@ -275,6 +278,14 @@ export interface CalculationStep {
   equationLatex?: string;
   variableDefinitions: { symbol: string; name: string; value: string; unit: string; classification: SourceClassification }[];
   substitution: string;
+  /**
+   * LaTeX form of `substitution`, or absent when the line is prose.
+   *
+   * Derived from `substitution` at build time rather than authored by hand: the
+   * substitution holds live computed numbers, so a hand-written entry would go stale
+   * the moment an input changed.
+   */
+  substitutionLatex?: string;
   numericResult: number;
   formattedResult: string;
   sourceCitation: string;

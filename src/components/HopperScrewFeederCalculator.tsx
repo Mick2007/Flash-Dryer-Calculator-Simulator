@@ -27,6 +27,7 @@ const HopperScrew3DViewer = React.lazy(() =>
   import('./HopperScrew3DViewer').then((m) => ({ default: m.HopperScrew3DViewer })),
 );
 import { ScrewFeederDrawing } from './ScrewFeederDrawing';
+import { Latex } from './Latex';
 
 interface HopperScrewFeederCalculatorProps {
   results: CalculationResults;
@@ -863,7 +864,7 @@ RECOMMENDED INSTALLED MOTOR: ${screwFeederDesign.recommendedMotorPowerKW.toFixed
                     Side Wall Slope Angle (A)
                   </span>
                   <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-sky-100 text-sky-800">
-                    Width Direction
+                    Length Direction
                   </span>
                 </div>
 
@@ -876,17 +877,17 @@ RECOMMENDED INSTALLED MOTOR: ${screwFeederDesign.recommendedMotorPowerKW.toFixed
 
                 <div className="text-[11px] font-mono bg-white p-2.5 rounded-lg border border-slate-200 space-y-1 text-slate-600">
                   <div className="flex justify-between">
-                    <span>Run_W = (W1 - W2) / 2</span>
-                    <strong className="text-slate-800">{(hopperDesign.runWidthM * 1000).toFixed(0)} mm</strong>
+                    <span>Run_L = (L1 - L2) / 2</span>
+                    <strong className="text-slate-800">{(hopperDesign.runLengthM * 1000).toFixed(0)} mm</strong>
                   </div>
                   <div className="flex justify-between border-t border-slate-100 pt-1">
-                    <span>Angle A = arctan(h2 / Run_W)</span>
+                    <span>Angle A = arctan(h2 / Run_L)</span>
                     <strong className="text-sky-700 font-bold">{hopperDesign.wallSlopeAngleADeg}&deg;</strong>
                   </div>
                 </div>
 
                 <p className="text-[10px] text-slate-500">
-                  Computed from h2 = {hopperDesign.lowerTaperedHeightM.toFixed(3)} m and Run_W = {hopperDesign.runWidthM.toFixed(3)} m (IITA ref: 76&deg;)
+                  A side wall is a left/right panel, so its horizontal offset is along the length. Computed from h2 = {hopperDesign.lowerTaperedHeightM.toFixed(3)} m and Run_L = {hopperDesign.runLengthM.toFixed(3)} m (IITA ref: 76&deg;)
                 </p>
               </div>
 
@@ -897,7 +898,7 @@ RECOMMENDED INSTALLED MOTOR: ${screwFeederDesign.recommendedMotorPowerKW.toFixed
                     End Wall Slope Angle (B)
                   </span>
                   <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-sky-100 text-sky-800">
-                    Length Direction
+                    Width Direction
                   </span>
                 </div>
 
@@ -910,17 +911,17 @@ RECOMMENDED INSTALLED MOTOR: ${screwFeederDesign.recommendedMotorPowerKW.toFixed
 
                 <div className="text-[11px] font-mono bg-white p-2.5 rounded-lg border border-slate-200 space-y-1 text-slate-600">
                   <div className="flex justify-between">
-                    <span>Run_L = (L1 - L2) / 2</span>
-                    <strong className="text-slate-800">{(hopperDesign.runLengthM * 1000).toFixed(0)} mm</strong>
+                    <span>Run_W = (W1 - W2) / 2</span>
+                    <strong className="text-slate-800">{(hopperDesign.runWidthM * 1000).toFixed(0)} mm</strong>
                   </div>
                   <div className="flex justify-between border-t border-slate-100 pt-1">
-                    <span>Angle B = arctan(h2 / Run_L)</span>
+                    <span>Angle B = arctan(h2 / Run_W)</span>
                     <strong className="text-sky-700 font-bold">{hopperDesign.wallSlopeAngleBDeg}&deg;</strong>
                   </div>
                 </div>
 
                 <p className="text-[10px] text-slate-500">
-                  Computed from h2 = {hopperDesign.lowerTaperedHeightM.toFixed(3)} m and Run_L = {hopperDesign.runLengthM.toFixed(3)} m (IITA ref: 81&deg;)
+                  An end wall is a front/back panel, so its horizontal offset is along the width. Computed from h2 = {hopperDesign.lowerTaperedHeightM.toFixed(3)} m and Run_W = {hopperDesign.runWidthM.toFixed(3)} m (IITA ref: 81&deg;)
                 </p>
               </div>
 
@@ -1304,9 +1305,19 @@ RECOMMENDED INSTALLED MOTOR: ${screwFeederDesign.recommendedMotorPowerKW.toFixed
                     </p>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1 bg-slate-50 p-2.5 rounded-lg border border-slate-100 font-mono text-[11px]">
-                      <div>
+                      <div className="min-w-0">
                         <span className="text-slate-400 block text-[10px] uppercase font-sans">Formula:</span>
-                        <span className="font-bold text-slate-800">{step.equation}</span>
+                        {/* Typeset when the engine supplied a LaTeX form, else the
+                            plain-text equation. The plain string is kept in the DOM
+                            for copy/paste and for readers of the source. */}
+                        {step.equationLatex ? (
+                          <>
+                            <Latex tex={step.equationLatex} className="block text-slate-900 overflow-x-auto" />
+                            <span className="sr-only">{step.equation}</span>
+                          </>
+                        ) : (
+                          <span className="font-bold text-slate-800">{step.equation}</span>
+                        )}
                       </div>
                       <div>
                         <span className="text-slate-400 block text-[10px] uppercase font-sans">Substitution:</span>
@@ -1354,9 +1365,16 @@ RECOMMENDED INSTALLED MOTOR: ${screwFeederDesign.recommendedMotorPowerKW.toFixed
                     </p>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1 bg-slate-50 p-2.5 rounded-lg border border-slate-100 font-mono text-[11px]">
-                      <div>
+                      <div className="min-w-0">
                         <span className="text-slate-400 block text-[10px] uppercase font-sans">Formula:</span>
-                        <span className="font-bold text-slate-800">{step.equation}</span>
+                        {step.equationLatex ? (
+                          <>
+                            <Latex tex={step.equationLatex} className="block text-slate-900 overflow-x-auto" />
+                            <span className="sr-only">{step.equation}</span>
+                          </>
+                        ) : (
+                          <span className="font-bold text-slate-800">{step.equation}</span>
+                        )}
                       </div>
                       <div>
                         <span className="text-slate-400 block text-[10px] uppercase font-sans">Substitution:</span>

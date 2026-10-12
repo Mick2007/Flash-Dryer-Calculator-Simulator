@@ -106,6 +106,18 @@ export const Cad3dViewer: React.FC<Cad3dViewerProps> = ({
   const [showPressureMap, setShowPressureMap] = useState<boolean>(true);
   const [focusedJointId, setFocusedJointId] = useState<string | null>(null);
 
+  // View mode the camera has actually been driven to. The view toolbar lives in
+  // the parent, so selecting a button only changes the `viewMode` prop — nothing
+  // told this component the user wanted the camera moved. The camera therefore
+  // kept its old direction while the rebuild effect recentred it, which reads as
+  // "I clicked Top and nothing happened".
+  //
+  // Tracking the applied mode lets this component distinguish a genuine user
+  // request (apply it) from the initial mount and from a geometry rebuild driven
+  // by the same viewMode (preserve the user's current orientation, so a resize
+  // does not yank the camera back to an axis).
+  const appliedViewModeRef = useRef<CadViewMode>(viewMode);
+
   // Model parameters and validation derived deterministically from results
   const currentParams = useMemo(() => extractParametricModel(results), [results]);
   const validationReport = currentParams.validationReport;
@@ -143,14 +155,21 @@ export const Cad3dViewer: React.FC<Cad3dViewerProps> = ({
     const width = container.clientWidth || 800;
     const height = container.clientHeight || 560;
 
-    // Scene. Warm graphite rather than the old blue-black, so the CAD canvas sits in
-    // the same family as the worksheet surface instead of reading as a separate app.
+    // Scene. White, to match the worksheet surface the CAD canvas sits inside, and to
+    // read the way an engineering drawing is read. The previous warm graphite
+    // (0x16150f) was chosen to sit in the same family as the sheet, but the sheet is
+    // light — so the canvas was the one dark panel on the page.
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x16150f);
+    scene.background = new THREE.Color(0xffffff);
     sceneRef.current = scene;
 
-    // Fog for realistic industrial atmospheric depth
-    scene.fog = new THREE.FogExp2(0x16150f, 0.016);
+    // Fog for realistic industrial atmospheric depth.
+    //
+    // It MUST be the same colour as the background. Fog here is a depth cue, not a mood:
+    // against the old graphite backdrop a near-black fog blended the far end of the
+    // machine into the background. Against white, a black fog fades the same geometry to
+    // BLACK, which reads as a hole punched in the drawing rather than as distance.
+    scene.fog = new THREE.FogExp2(0xffffff, 0.016);
 
     // Perspective Camera (FOV 40 for accurate CAD representation)
     const persCamera = new THREE.PerspectiveCamera(40, width / height, 0.1, 100);
@@ -244,8 +263,14 @@ export const Cad3dViewer: React.FC<Cad3dViewerProps> = ({
     rimLight.position.set(0, -5, -12);
     scene.add(rimLight);
 
-    // Ground Grid
-    const grid = new THREE.GridHelper(30, 30, 0x10b981, 0x1e293b);
+    // Ground Grid.
+    //
+    // Recoloured for a white backdrop. The old pair (emerald centre, near-black
+    // #1e293b lines) was tuned to be a faint suggestion on graphite; inverted onto white
+    // the same lines become heavy black rules competing with the machine. Light grey
+    // rules with a slightly stronger centre line keep the grid legible as a ground
+    // reference without drawing more attention than the equipment.
+    const grid = new THREE.GridHelper(30, 30, 0x94a3b8, 0xd8dee6);
     grid.position.y = 0;
     scene.add(grid);
 
@@ -459,8 +484,22 @@ export const Cad3dViewer: React.FC<Cad3dViewerProps> = ({
       dimensionSystemRef.current = dims;
       scene.add(dims.group);
 
-      // 6. Camera Framing: keep orientation stable and fit model bounds
-      fitCameraToBounds(assembly.bounds, viewMode, hasInitializedCameraRef.current);
+      // 6. Camera Framing.
+      //
+      // A viewMode the user actually selected must be APPLIED, not preserved.
+      // This effect re-runs whenever viewMode changes, so before the toolbar was
+      // wired up, every button press rebuilt the scene and then called
+      // fitCameraToBounds with preserveOrientation = true (because
+      // hasInitializedCameraRef was already true), which recentred and rescaled
+      // the camera but kept its old direction. The buttons looked dead.
+      //
+      // `isNewViewRequest` is true only when the incoming mode differs from the
+      // one the camera was last driven to, so a plain geometry rebuild still
+      // preserves whatever angle the user orbited to.
+      const isNewViewRequest = appliedViewModeRef.current !== viewMode;
+      appliedViewModeRef.current = viewMode;
+
+      fitCameraToBounds(assembly.bounds, viewMode, !isNewViewRequest && hasInitializedCameraRef.current);
       hasInitializedCameraRef.current = true;
 
       setIsRegenerating(false);
@@ -468,6 +507,28 @@ export const Cad3dViewer: React.FC<Cad3dViewerProps> = ({
 
     return () => clearTimeout(timer);
   }, [results, viewMode, fitCameraToBounds, essentialOnly, showFlowArrows, showDimensions]);
+
+  // Apply a view-mode change to the camera immediately.
+  //
+  // The rebuild effect above is debounced by 70 ms and also re-creates the whole
+  // assembly, which is wasteful for what is only a camera move. More importantly
+  // it cannot run before the geometry exists, so on the very first selection it
+  // would silently do nothing. This effect runs as soon as the mode changes and
+  // only touches the camera.
+  useEffect(() => {
+    const assembly = assemblyRef.current;
+    const persCam = persCameraRef.current;
+    const orthoCam = orthoCameraRef.current;
+    if (!assembly || !persCam || !orthoCam) return;
+
+    // Only act when the parent asked for a mode the camera is not already in.
+    // Otherwise this would fight the rebuild effect, which also drives the camera
+    // on mount and on every results change.
+    if (appliedViewModeRef.current === viewMode) return;
+    appliedViewModeRef.current = viewMode;
+
+    fitCameraToBounds(assembly.bounds, viewMode, false);
+  }, [viewMode, fitCameraToBounds]);
 
   // Handle Exploded View offsets
   useEffect(() => {
@@ -519,6 +580,11 @@ export const Cad3dViewer: React.FC<Cad3dViewerProps> = ({
       if (assembly) {
         fitCameraToBounds(assembly.bounds, mode, false);
       }
+      // Record that the camera now matches this mode. Without this, the viewMode
+      // effect below sees an unapplied change and runs fitCameraToBounds a
+      // second time — harmless in itself, but it makes the applied-mode ref
+      // ambiguous as to which call actually positioned the camera.
+      appliedViewModeRef.current = mode;
       if (onViewModeChange) onViewModeChange(mode);
     },
     [fitCameraToBounds, onViewModeChange]
@@ -620,11 +686,11 @@ export const Cad3dViewer: React.FC<Cad3dViewerProps> = ({
     <div
       ref={containerRef}
       onClick={handleCanvasClick}
-      className="w-full h-full min-h-[480px] lg:min-h-[580px] relative overflow-hidden select-none bg-slate-950 cursor-grab active:cursor-grabbing"
+      className="w-full h-full min-h-[480px] lg:min-h-[580px] relative overflow-hidden select-none bg-white cursor-grab active:cursor-grabbing"
     >
       {/* Regeneration Progress Overlay */}
       {isRegenerating && (
-        <div className="absolute inset-0 z-30 bg-slate-950/40 backdrop-blur-xs flex items-center justify-center pointer-events-none">
+        <div className="absolute inset-0 z-30 bg-white/70 backdrop-blur-xs flex items-center justify-center pointer-events-none">
           <div className="flex items-center gap-2.5 bg-slate-900/90 border border-emerald-500/40 px-4 py-2 rounded-xl text-emerald-300 font-mono text-xs shadow-2xl animate-pulse">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
             <span>Regenerating 3D Parametric Model (Ø{results.dimensions.tubeDiameterStandardMm}mm)...</span>

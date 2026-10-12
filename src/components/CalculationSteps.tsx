@@ -12,6 +12,7 @@ import {
   Lightbulb,
 } from 'lucide-react';
 import { CalculationResults, CalculationStep } from '../types/dryer';
+import { Latex } from './Latex';
 
 interface CalculationStepsProps {
   results: CalculationResults;
@@ -179,13 +180,22 @@ export const CalculationSteps: React.FC<CalculationStepsProps> = ({ results }) =
                   </p>
                 )}
 
-                {/* 1. Equation */}
+                {/* 1. Equation. Typeset with KaTeX when a LaTeX form exists, else the
+                    plain-text form. The plain-text string stays in the DOM either way —
+                    the search box above matches on it, and a reader can copy it. */}
                 <div className="bg-graphite text-paper px-3 py-2.5 overflow-x-auto">
-                  <div className="flex items-baseline gap-2.5 min-w-max">
-                    <span className="text-[9px] uppercase tracking-widest text-brass-bright font-semibold shrink-0">
+                  <div className="flex items-start gap-2.5 min-w-max">
+                    <span className="text-[9px] uppercase tracking-widest text-brass-bright font-semibold shrink-0 mt-1.5">
                       Equation
                     </span>
-                    <span className="eq text-[12px] font-medium">{step.equation}</span>
+                    {step.equationLatex ? (
+                      <>
+                        <Latex tex={step.equationLatex} className="text-paper" />
+                        <span className="sr-only">{step.equation}</span>
+                      </>
+                    ) : (
+                      <span className="eq text-[12px] font-medium">{step.equation}</span>
+                    )}
                   </div>
                 </div>
 
@@ -225,9 +235,21 @@ export const CalculationSteps: React.FC<CalculationStepsProps> = ({ results }) =
                   <span className="text-[10px] uppercase tracking-widest text-graphite-faint block mb-1">
                     Substitution
                   </span>
-                  <p className="eq text-[12px] leading-relaxed break-words">
-                    {step.substitution}
-                  </p>
+                  {step.substitutionLatex ? (
+                    <>
+                      <Latex
+                        tex={step.substitutionLatex}
+                        className="text-graphite break-words"
+                      />
+                      {/* The plain string stays selectable so it can be copied into a
+                          spreadsheet, which is what most readers actually want it for. */}
+                      <span className="sr-only">{step.substitution}</span>
+                    </>
+                  ) : (
+                    <p className="eq text-[12px] leading-relaxed break-words">
+                      {step.substitution}
+                    </p>
+                  )}
                 </div>
 
                 {/* 5. Result & notes */}

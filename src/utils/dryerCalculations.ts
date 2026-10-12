@@ -18,6 +18,8 @@ import {
   ScrewFeederDesignReport
 } from '../types/dryer';
 import { STANDARD_PIPE_SIZES_MM, STAIRMAND_RATIOS, LAPPLE_RATIOS, FUEL_STANDARDS, BLOWER_STANDARDS, CIRAD_BENCHMARKS } from './constants';
+import { latexForStep } from './stepLatex';
+import { substitutionToLatex } from './substitutionLatex';
 
 // ==========================================
 // SHARED NUMERICAL HELPERS
@@ -123,6 +125,15 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     sourceClassification: SourceClassification,
     notes?: string
   ) {
+    // `equationLatex` is looked up rather than passed in, so the plain-text and
+    // typeset forms of an equation can never drift apart at a call site.
+    //
+    // `substitutionLatex` is CONVERTED from the substitution string rather than looked
+    // up. The substitution carries live computed numbers, so a hand-written entry
+    // would hard-code today's values and be wrong as soon as an input changed.
+    const equationLatex = latexForStep(category, symbol);
+    const substitutionLatex = substitutionToLatex(substitution);
+
     steps.push({
       id: `step-${stepCounter++}`,
       category,
@@ -131,8 +142,10 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
       unit,
       simpleExplanation,
       equation,
+      ...(equationLatex ? { equationLatex } : {}),
       variableDefinitions,
       substitution,
+      ...(substitutionLatex ? { substitutionLatex } : {}),
       numericResult,
       formattedResult,
       sourceCitation,
@@ -1376,25 +1389,41 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
   const hopperVolumeMarginPercent = ((hopperTotalGeometricVolumeM3 - hopperTotalRequiredVolumeM3) / Math.max(1e-6, hopperTotalRequiredVolumeM3)) * 100;
 
   // 5. Dynamic Calculation of Side Wall Angles (A and B) & Corner Valley Angle (C)
-  // Side Wall Slope Angle (A) [Width Direction]:
-  // Run_W = (W1 - W2) / 2
-  // Angle A = arctan(h2 / Run_W)
+  //
+  // WHICH RUN DRIVES WHICH ANGLE. A wall's slope is set by how far its top edge
+  // sits horizontally from its bottom edge, measured PERPENDICULAR to that edge.
+  // A side wall is a left/right panel: it runs along the LENGTH of the hopper, so
+  // its top-to-bottom offset is in the length direction and its run is
+  // Run_L = (L1 - L2) / 2. An end wall is a front/back panel: it runs along the
+  // WIDTH, so its offset is in the width direction and its run is
+  // Run_W = (W1 - W2) / 2.
+  //
+  //     A (side wall) = arctan(h2 / Run_L)
+  //     B (end  wall) = arctan(h2 / Run_W)
+  //
+  // These two were previously transposed: A was driven by Run_W and B by Run_L.
+  // The geometry was never wrong, only the attribution. The tell was in this
+  // app's own output — at the IITA/Kuye default geometry the transposed pairing
+  // produced A = 80.8 deg against a documented reference of 76 deg, and
+  // B = 75.9 deg against a documented 81 deg, i.e. the same two numbers with
+  // the names swapped. The corrected pairing gives A = 75.9 and B = 80.8, which
+  // reproduce the Kuye et al. (2011) reference angles to within 0.2 deg.
   const runWM = Math.max(0.001, (hopperTopWidthM - hopperOutletWidthM) / 2);
-  const wallSlopeAngleARad = Math.atan(hopperLowerHeightM / runWM);
+  const runLM = Math.max(0.001, (hopperTopLengthM - hopperOutletLengthM) / 2);
+
+  // Side Wall Slope Angle (A) [Length Direction]:
+  const wallSlopeAngleARad = Math.atan(hopperLowerHeightM / runLM);
   const hopperWallAngleADeg = Math.round((wallSlopeAngleARad * 180 / Math.PI) * 10) / 10;
 
-  // End Wall Slope Angle (B) [Length Direction]:
-  // Run_L = (L1 - L2) / 2
-  // Angle B = arctan(h2 / Run_L)
-  const runLM = Math.max(0.001, (hopperTopLengthM - hopperOutletLengthM) / 2);
-  const wallSlopeAngleBRad = Math.atan(hopperLowerHeightM / runLM);
+  // End Wall Slope Angle (B) [Width Direction]:
+  const wallSlopeAngleBRad = Math.atan(hopperLowerHeightM / runWM);
   const hopperWallAngleBDeg = Math.round((wallSlopeAngleBRad * 180 / Math.PI) * 10) / 10;
 
   // Corner Valley Angle (C) Verification:
   // cot²(C) = cot²(A) + cot²(B)
   // Angle C = arccot( sqrt( cot²(A) + cot²(B) ) ) = arctan( 1 / sqrt(cot²(A) + cot²(B)) )
-  const cotA = 1 / Math.tan(wallSlopeAngleARad); // = runWM / hopperLowerHeightM
-  const cotB = 1 / Math.tan(wallSlopeAngleBRad); // = runLM / hopperLowerHeightM
+  const cotA = 1 / Math.tan(wallSlopeAngleARad); // = runLM / hopperLowerHeightM
+  const cotB = 1 / Math.tan(wallSlopeAngleBRad); // = runWM / hopperLowerHeightM
   const cot2C = Math.pow(cotA, 2) + Math.pow(cotB, 2);
   const cotC = Math.sqrt(cot2C);
   const valleyAngleCRad = Math.atan(1 / cotC);
@@ -1591,27 +1620,27 @@ export function calculateFlashDryer(inputs: DryerInputs): CalculationResults {
     'Angle_C',
     'deg',
     'Trigonometrical calculation of side wall angle A and end wall angle B from hopper geometry, and derivation of resulting corner valley seam angle C to verify mass gravity flow without bridging according to IITA reference standards.',
-    'A = arctan(h2 / Run_W),  B = arctan(h2 / Run_L),  cot²(C) = cot²(A) + cot²(B)',
+    'A = arctan(h2 / Run_L),  B = arctan(h2 / Run_W),  cot²(C) = cot²(A) + cot²(B)',
     [
       { symbol: 'W1', name: 'Top opening width', value: hopperTopWidthM.toFixed(2), unit: 'm', classification: 'Calculated' },
       { symbol: 'W2', name: 'Outlet throat width', value: hopperOutletWidthM.toFixed(2), unit: 'm', classification: 'Calculated' },
-      { symbol: 'Run_W', name: 'Side wall horizontal run (W1 - W2) / 2', value: runWM.toFixed(3), unit: 'm', classification: 'Calculated' },
+      { symbol: 'Run_W', name: 'End wall horizontal run (W1 - W2) / 2', value: runWM.toFixed(3), unit: 'm', classification: 'Calculated' },
       { symbol: 'L1', name: 'Top opening length', value: hopperTopLengthM.toFixed(2), unit: 'm', classification: 'Calculated' },
       { symbol: 'L2', name: 'Outlet throat length', value: hopperOutletLengthM.toFixed(2), unit: 'm', classification: 'Calculated' },
-      { symbol: 'Run_L', name: 'End wall horizontal run (L1 - L2) / 2', value: runLM.toFixed(3), unit: 'm', classification: 'Calculated' },
+      { symbol: 'Run_L', name: 'Side wall horizontal run (L1 - L2) / 2', value: runLM.toFixed(3), unit: 'm', classification: 'Calculated' },
       { symbol: 'h2', name: 'Lower tapered section height', value: hopperLowerHeightM.toFixed(3), unit: 'm', classification: 'Calculated' },
-      { symbol: 'Angle A', name: 'Side wall slope angle [Width direction]', value: `${hopperWallAngleADeg}°`, unit: 'deg', classification: 'Calculated' },
-      { symbol: 'Angle B', name: 'End wall slope angle [Length direction]', value: `${hopperWallAngleBDeg}°`, unit: 'deg', classification: 'Calculated' },
+      { symbol: 'Angle A', name: 'Side wall slope angle [Length direction]', value: `${hopperWallAngleADeg}°`, unit: 'deg', classification: 'Calculated' },
+      { symbol: 'Angle B', name: 'End wall slope angle [Width direction]', value: `${hopperWallAngleBDeg}°`, unit: 'deg', classification: 'Calculated' },
       { symbol: 'cot²(C)', name: 'cot²(A) + cot²(B)', value: cot2C.toFixed(4), unit: '-', classification: 'Calculated' },
       { symbol: 'Angle C', name: 'Resulting corner valley angle', value: `${hopperValleyAngleCDeg}°`, unit: 'deg', classification: 'Calculated' },
       { symbol: 'C_standard', name: 'IITA / Jenike standard steepness threshold', value: '≥ 70°', unit: 'deg', classification: 'Calculated' }
     ],
-    `Run_W = (${hopperTopWidthM.toFixed(2)} - ${hopperOutletWidthM.toFixed(2)}) / 2 = ${runWM.toFixed(3)} m => A = arctan(${hopperLowerHeightM.toFixed(3)} / ${runWM.toFixed(3)}) = ${hopperWallAngleADeg}°;  Run_L = (${hopperTopLengthM.toFixed(2)} - ${hopperOutletLengthM.toFixed(2)}) / 2 = ${runLM.toFixed(3)} m => B = arctan(${hopperLowerHeightM.toFixed(3)} / ${runLM.toFixed(3)}) = ${hopperWallAngleBDeg}°;  cot²(C) = (${cotA.toFixed(4)})² + (${cotB.toFixed(4)})² = ${cot2C.toFixed(4)} => C = ${hopperValleyAngleCDeg}°`,
+    `Run_L = (${hopperTopLengthM.toFixed(2)} - ${hopperOutletLengthM.toFixed(2)}) / 2 = ${runLM.toFixed(3)} m => A = arctan(${hopperLowerHeightM.toFixed(3)} / ${runLM.toFixed(3)}) = ${hopperWallAngleADeg}°;  Run_W = (${hopperTopWidthM.toFixed(2)} - ${hopperOutletWidthM.toFixed(2)}) / 2 = ${runWM.toFixed(3)} m => B = arctan(${hopperLowerHeightM.toFixed(3)} / ${runWM.toFixed(3)}) = ${hopperWallAngleBDeg}°;  cot²(C) = (${cotA.toFixed(4)})² + (${cotB.toFixed(4)})² = ${cot2C.toFixed(4)} => C = ${hopperValleyAngleCDeg}°`,
     hopperValleyAngleCDeg,
     `Side A: ${hopperWallAngleADeg}°, End B: ${hopperWallAngleBDeg}° => Valley Angle C: ${hopperValleyAngleCDeg}° [${isValleyAngleSufficient ? 'PASS: C ≥ 70° (Mass Flow Verified)' : 'WARNING: C < 70° (Bridging Risk)'}]`,
     'Kuye et al. (2011), Section 3.1, Eq. 7; Academia paper page 15; CEMA / Jenike Mass Flow Standard',
     'Calculated',
-    `Dynamically computed from geometry: Run_W = ${(runWM * 1000).toFixed(0)} mm, Run_L = ${(runLM * 1000).toFixed(0)} mm. Valley angle C = ${hopperValleyAngleCDeg}° ${isValleyAngleSufficient ? 'satisfies the ≥ 70° reference steepness standard' : 'is below the 70° steepness guideline'}, ensuring cohesive cassava mash cake slides freely toward the screw feeder without stagnant dead-zones or arching.`
+    `Dynamically computed from geometry. A side wall is a left/right panel, so it runs along the hopper LENGTH and its horizontal offset is Run_L = ${(runLM * 1000).toFixed(0)} mm; an end wall is a front/back panel, so it runs along the WIDTH and its offset is Run_W = ${(runWM * 1000).toFixed(0)} mm. Valley angle C = ${hopperValleyAngleCDeg}° ${isValleyAngleSufficient ? 'satisfies the ≥ 70° reference steepness standard' : 'is below the 70° steepness guideline'}, ensuring cohesive cassava mash cake slides freely toward the screw feeder without stagnant dead-zones or arching. Note that C is invariant under any A/B relabelling, because cot²(C) is the sum of the two cotangents and is therefore symmetric in A and B.`
   );
 
   addStep(

@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { CalculationResults } from '../types/dryer';
 import { generateEngineeringPdf } from '../utils/pdfGenerator';
+import { Latex } from './Latex';
 
 interface PrintableReportModalProps {
   results: CalculationResults;
@@ -433,7 +434,20 @@ export const PrintableReportModal: React.FC<PrintableReportModalProps> = ({
                     </div>
                   )}
                   <div className="font-mono text-[11px] text-sky-900 bg-sky-50/70 p-1.5 rounded border border-sky-200/60">
-                    <strong>Equation:</strong> {step.equation}
+                    {/* Inline KaTeX so the equation sits on the same line as its
+                        label. `inline` avoids display-mode block spacing, which
+                        would push each of the 60 steps onto two lines and bloat
+                        the printed page count. The plain-text form is kept in the
+                        DOM for copy/paste and screen readers. */}
+                    <strong>Equation:</strong>{' '}
+                    {step.equationLatex ? (
+                      <>
+                        <Latex tex={step.equationLatex} inline className="text-sky-900" />
+                        <span className="sr-only">{step.equation}</span>
+                      </>
+                    ) : (
+                      step.equation
+                    )}
                   </div>
                   <div className="text-[11px] text-slate-600">
                     <strong>Source Citation:</strong> <em>{step.sourceCitation}</em>

@@ -102,6 +102,23 @@ export function buildMechanicalCadAssembly(
   const riserBaseX = venturiEndX + params.bendRadiusM;
   const ductY = params.venturiPosition.y;
 
+  // ITEM 27 — the downcomer position is TAKEN FROM THE MODEL, not recomputed here.
+  //
+  // The geometry builder previously placed the downcomer at `riserBaseX`, i.e. on
+  // the riser centreline, and ignored params.horizontalRunM entirely. The
+  // parametric model solved a horizontal run to hit the engine's developed length
+  // and drew its own centreline with the downcomer displaced by that run — so the
+  // costed pipe and the drawn pipe were two different machines, disagreeing by up
+  // to 1.5 m in X. Everything downstream of the return bend inherited the wrong
+  // position, which is why the transition into the cyclone looked like a kinked
+  // diagonal instead of a smooth bend.
+  //
+  // One source of truth: the model solves the run, the builder draws it.
+  const downcomerX = params.downcomerXM;
+  const downcomerExitY = params.downcomerExitYM;
+  const horizontalRunM = params.horizontalRunM;
+  const runStartX = downcomerX - horizontalRunM;
+
   // 1.1 Duct from Heat Exchanger outlet to Venturi inlet
   const hexOutX = params.hexPosition.x + params.hexWidthM / 2;
   const hexToVenturiDist = venturiInX - hexOutX;
@@ -192,49 +209,175 @@ export function buildMechanicalCadAssembly(
   uBendMesh.castShadow = true;
   pipeGroup.add(uBendMesh);
 
-  // 1.5 Vertical Downcomer Return Pipe (True circular cylindrical spool)
+  // 1.4b Horizontal run at the top of the loop
+  //
+  // Drawn only when the layout solver found one. Previously this run existed in
+  // the engine's developed length and in the model's centreline, but had no
+  // geometry at all: the pipe jumped straight from the U-bend to a downcomer at
+  // the riser X. This is the segment that pays for the loop, so it has to be
+  // drawn where the solver put it.
   const downcomerZ = -params.bendRadiusM * 2;
-  const downcomerExitY = Math.max(params.cycloneInletYM + 0.3, 3.2);
+  if (horizontalRunM > 0.01) {
+    const runGeo = new THREE.CylinderGeometry(rPipe, rPipe, horizontalRunM, 24);
+    runGeo.rotateZ(Math.PI / 2);
+    const runMesh = new THREE.Mesh(runGeo, mainMat);
+    runMesh.position.set(runStartX + horizontalRunM / 2, params.riserTopYM, downcomerZ);
+    runMesh.castShadow = true;
+    pipeGroup.add(runMesh);
+  }
+
+  // 1.5 Vertical Downcomer Return Pipe (True circular cylindrical spool)
   const downcomerHeight = params.riserTopYM - downcomerExitY;
   const downcomerGeo = new THREE.CylinderGeometry(rPipe, rPipe, downcomerHeight, 24);
   const downcomerMesh = new THREE.Mesh(downcomerGeo, mainMat);
-  downcomerMesh.position.set(riserBaseX, (params.riserTopYM + downcomerExitY) / 2, downcomerZ);
+  downcomerMesh.position.set(downcomerX, (params.riserTopYM + downcomerExitY) / 2, downcomerZ);
   downcomerMesh.castShadow = true;
   pipeGroup.add(downcomerMesh);
 
   // Flanged joint at top of downcomer mating with U-bend
   const downcomerTopFlange = createFlangeJoint(rPipe, params.flangeThicknessM, materials, 8);
-  downcomerTopFlange.position.set(riserBaseX, params.riserTopYM, downcomerZ);
+  downcomerTopFlange.position.set(downcomerX, params.riserTopYM, downcomerZ);
   pipeGroup.add(downcomerTopFlange);
 
   // Flanged joint at bottom of vertical downcomer
   const downcomerBotFlange = createFlangeJoint(rPipe, params.flangeThicknessM, materials, 8);
-  downcomerBotFlange.position.set(riserBaseX, downcomerExitY, downcomerZ);
+  downcomerBotFlange.position.set(downcomerX, downcomerExitY, downcomerZ);
   pipeGroup.add(downcomerBotFlange);
 
   // 1.6 Transition Spool turning smoothly into Cyclone Tangential Inlet Flange
-  // Approaches purely horizontally along +X at the terminal point to mate square with cyclone inlet
-  const transitionPts = [
-    new THREE.Vector3(riserBaseX, downcomerExitY, downcomerZ),
-    new THREE.Vector3(riserBaseX + 0.3, downcomerExitY - 0.05, downcomerZ),
-    new THREE.Vector3(
-      (riserBaseX + params.cycloneInletFlangePoint.x) * 0.5,
-      (downcomerExitY + params.cycloneInletFlangePoint.y) * 0.5,
-      (downcomerZ + params.cycloneInletFlangePoint.z) * 0.5
-    ),
-    new THREE.Vector3(
-      params.cycloneInletFlangePoint.x - 0.35,
-      params.cycloneInletFlangePoint.y,
-      params.cycloneInletFlangePoint.z
-    ),
-    new THREE.Vector3(
-      params.cycloneInletFlangePoint.x,
-      params.cycloneInletFlangePoint.y,
-      params.cycloneInletFlangePoint.z
-    ),
-  ];
-  const transitionCurve = new THREE.CatmullRomCurve3(transitionPts, false, 'catmullrom', 0.15);
-  const transitionGeo = new THREE.TubeGeometry(transitionCurve, 32, rPipe, 24, false);
+  //
+  // ITEM 28 — this was the "always bent, never smooth" connection.
+  //
+  // The old control points were:
+  //   (riserX,      exitY,  z)            descending
+  //   (riserX+0.3,  exitY-0.05, z)        moving in X AND dropping in Y at once
+  //   (mid,         mid,     z)           a diagonal chord
+  //   (flangeX-0.35, inletY,  z)
+  //   (flangeX,      inletY,  z)
+  //
+  // Two problems. First, the second point breaks tangent continuity: the pipe
+  // leaves the vertical run already travelling diagonally, so the bend starts
+  // before it has finished turning. Second, a Catmull-Rom spline through a
+  // descending-then-diagonal-then-horizontal sequence OVERSHOOTS on the inside of
+  // each turn, which is what produced the visible kink where the downcomer met
+  // the cyclone.
+  //
+  // The fix is an explicit arc: leave the vertical run tangentially, sweep a
+  // circular elbow of the engine's own bend radius, and then run straight and
+  // horizontal into the flange. Every point is tangent-continuous by
+  // construction, and the tangent at the flange is exactly -X, so it mates square
+  // with the tangential inlet.
+  const flangePt = params.cycloneInletFlangePoint;
+  const transitionPts: THREE.Vector3[] = [];
+
+  // Signed geometry of the turn.
+  //
+  // Both quantities can be NEGATIVE. An earlier version guarded on
+  // `horizontalReach > 0 && rise > 0`, which skipped the elbow entirely whenever
+  // either went negative and left a bare diagonal. On the IITA benchmark the
+  // downcomer exits one bend radius ABOVE the inlet centreline (rise = -0.90 m), so
+  // that guard was false on every load and no arc was drawn at all — the exact
+  // "always bent, never smooth" defect it was written to fix.
+  //
+  // The elbow must therefore work in BOTH directions: descending into an inlet below
+  // it and rising into one above it. `dirY` carries that sign.
+  const horizontalReachM = flangePt.x - downcomerX;
+  const riseM = params.cycloneInletYM - downcomerExitY;
+  const dirY = Math.sign(riseM) || 1;
+
+  if (Math.abs(horizontalReachM) > 1e-3 && Math.abs(riseM) > 1e-3) {
+    // A 90-degree elbow consumes one radius along EACH axis, so it is limited by
+    // whichever is tighter rather than assumed.
+    const elbowR = Math.max(
+      1e-3,
+      Math.min(params.bendRadiusM, Math.abs(horizontalReachM), Math.abs(riseM))
+    );
+    // Straight lead-in along the downcomer's own axis, covering any vertical
+    // distance the arc cannot, travelled TOWARD the inlet. The sign follows `dirY`,
+    // so a descending elbow steps down and a rising one steps up. Its length is
+    // |rise| - R, and the arc supplies exactly the remaining R.
+    const leadInY = downcomerExitY + dirY * (Math.abs(riseM) - elbowR);
+    // Where the arc leaves the vertical line, one radius along the exit direction.
+    const arcStartX = downcomerX + Math.sign(horizontalReachM) * elbowR;
+    const straightRunM = Math.abs(horizontalReachM) - elbowR;
+
+    if (Math.abs(leadInY - downcomerExitY) > 1e-3) {
+      transitionPts.push(new THREE.Vector3(downcomerX, leadInY, downcomerZ));
+    }
+
+    // ITEM 36 — the arc's TRUE START must be a control point.
+    //
+    // The sweep loop below starts at i = 1, so the arc's i = 0 end — the point where
+    // the elbow leaves the downcomer ON THE DUCT AXIS — was never in the control list.
+    // Catmull-Rom needs a neighbour on each side of a segment, so with the first
+    // control point already 5.6 deg into the arc it EXTRAPOLATED backwards off the
+    // axis: the drawn pipe began 29 mm downstream and 88 mm below the downcomer exit
+    // even though the model put the exit exactly on it.
+    transitionPts.push(
+      new THREE.Vector3(
+        arcStartX - Math.sign(horizontalReachM) * elbowR,
+        leadInY,
+        downcomerZ
+      )
+    );
+
+    // Quarter circle, centre at (arcStartX, leadInY).
+    //
+    // The start lies at 180 deg from the centre — directly inboard, on the
+    // downcomer axis — and the end at 180 deg minus a quarter turn in the exit
+    // direction, which puts the tangent horizontal exactly at the inlet elevation.
+    // Sweeping 180 -> 270 turns downward into a lower inlet; 180 -> 90 turns upward.
+    const elbowSteps = 16;
+    const startDeg = 180;
+    const endDeg = 180 - dirY * 90;
+    for (let i = 1; i <= elbowSteps; i++) {
+      const deg = startDeg + ((endDeg - startDeg) * i) / elbowSteps;
+      const rad = (deg * Math.PI) / 180;
+      transitionPts.push(
+        new THREE.Vector3(
+          arcStartX + elbowR * Math.cos(rad),
+          leadInY + elbowR * Math.sin(rad),
+          downcomerZ
+        )
+      );
+    }
+
+    // Straight horizontal run into the flange, on the horizontal tangent.
+    if (straightRunM > 1e-3) {
+      transitionPts.push(
+        new THREE.Vector3(
+          arcStartX + (Math.sign(horizontalReachM) * straightRunM) / 2,
+          params.cycloneInletYM,
+          downcomerZ
+        )
+      );
+    }
+  }
+
+  // ITEM 36 — the flange is only a control point if the curve has not already
+  // arrived there.
+  //
+  // This push was unconditional, but the arc's 270 deg sample is ALREADY
+  // (flangePt.x, cycloneInletYM): reach and rise are both one bend radius, so the
+  // elbow's last point and this one are the same vector. Two identical consecutive
+  // control points give Catmull-Rom a zero-length segment, which it cannot
+  // interpolate — it overshot to x = 4.9826 (29 mm PAST the flange face) and then
+  // snapped back to 4.9534 on the final sample. That reversal is the visible
+  // "the duct has shifted and is not connected to the cyclone": the pipe visibly
+  // pokes through the mating flange and withdraws again.
+  const lastPt = transitionPts[transitionPts.length - 1];
+  if (
+    !lastPt ||
+    Math.abs(lastPt.x - flangePt.x) > 1e-6 ||
+    Math.abs(lastPt.y - params.cycloneInletYM) > 1e-6
+  ) {
+    transitionPts.push(new THREE.Vector3(flangePt.x, params.cycloneInletYM, downcomerZ));
+  }
+
+  // 'centripetal' rather than 'catmullrom': it cannot overshoot between control
+  // points, so even the straight sections cannot bow.
+  const transitionCurve = new THREE.CatmullRomCurve3(transitionPts, false, 'centripetal');
+  const transitionGeo = new THREE.TubeGeometry(transitionCurve, 48, rPipe, 24, false);
   const transitionMesh = new THREE.Mesh(transitionGeo, mainMat);
   transitionMesh.castShadow = true;
   pipeGroup.add(transitionMesh);
@@ -249,23 +392,82 @@ export function buildMechanicalCadAssembly(
   );
   pipeGroup.add(inletFlangeJoint);
 
-  // Square-to-round adapter transition collar bridging circular pipe to rectangular cyclone inlet box
-  const adapterLen = 0.18;
-  const adapterGeo = new THREE.CylinderGeometry(
-    rPipe,
-    Math.max(params.cycloneInletWidthM, params.cycloneInletHeightM) * 0.62,
-    adapterLen,
-    24
-  );
-  adapterGeo.rotateZ(Math.PI / 2);
-  const adapterMesh = new THREE.Mesh(adapterGeo, materials.stainlessSteel);
-  adapterMesh.position.set(
-    params.cycloneInletFlangePoint.x + adapterLen / 2,
-    params.cycloneInletFlangePoint.y,
-    params.cycloneInletFlangePoint.z
-  );
-  adapterMesh.castShadow = true;
-  pipeGroup.add(adapterMesh);
+  // ITEM 37 — the transition from the round flash duct to the rectangular tangential
+  // inlet.
+  //
+  // This was a cone:
+  //
+  //     new CylinderGeometry(rPipe, max(inletWidth, inletHeight) * 0.62, 0.18, 24)
+  //
+  // sized off the LARGER inlet dimension only. That produced a round mouth of
+  // 0.718 m — max(0.231, 0.579) x 1.24 — pressed flat against an opening 0.231 m wide
+  // in Z. The mouth overhung the slot by 243 mm on each side in Z and 69 mm top and
+  // bottom in Y, so the duct could not enter the cyclone at all. The gas path was
+  // blocked and the joint read as a funnel sitting on the outside of the barrel, which
+  // is the "shifted and not properly connected" symptom.
+  //
+  // It is now a real lofted transition. Both ends are generated from the same
+  // parameter sweep, so the far end is the inlet rectangle EXACTLY:
+  //
+  //     round end   x = flange.x,                  |y| <= R,   |z| <= R
+  //     rect end    x = flange.x + transitionLen,  |y| <= a/2, |z| <= b/2
+  //
+  // with a = inletHeight, b = inletWidth, both centred on the duct axis. The rectangle
+  // point for a given direction is t * (cos, sin) with t = min(halfH/|cos|, halfW/|sin|),
+  // so the sweep stays monotone and the walls do not cross.
+  const transitionLen = params.cycloneInletTransitionLengthM;
+  const halfH = params.cycloneInletHeightM / 2;
+  const halfW = params.cycloneInletWidthM / 2;
+  const segs = 48;
+  const ringPts: THREE.Vector3[][] = [[], []];
+
+  for (let i = 0; i < segs; i++) {
+    const th = (2 * Math.PI * i) / segs;
+    const c = Math.cos(th);
+    const s = Math.sin(th);
+    // Round end, in the Y-Z plane measured from +Y.
+    ringPts[0].push(
+      new THREE.Vector3(
+        params.cycloneInletFlangePoint.x,
+        params.cycloneInletFlangePoint.y + rPipe * c,
+        params.cycloneInletFlangePoint.z + rPipe * s
+      )
+    );
+    // Rectangle end, same direction, clamped to the rectangle boundary.
+    const t = Math.min(
+      Math.abs(c) < 1e-9 ? Infinity : halfH / Math.abs(c),
+      Math.abs(s) < 1e-9 ? Infinity : halfW / Math.abs(s)
+    );
+    ringPts[1].push(
+      new THREE.Vector3(
+        params.cycloneInletFlangePoint.x + transitionLen,
+        params.cycloneInletFlangePoint.y + t * c,
+        params.cycloneInletFlangePoint.z + t * s
+      )
+    );
+  }
+
+  {
+    const pos: number[] = [];
+    const idx: number[] = [];
+    for (const p of ringPts[0]) pos.push(p.x, p.y, p.z);
+    for (const p of ringPts[1]) pos.push(p.x, p.y, p.z);
+    for (let i = 0; i < segs; i++) {
+      const j = (i + 1) % segs;
+      const a0 = i;
+      const b0 = segs + i;
+      const a1 = j;
+      const b1 = segs + j;
+      idx.push(a0, b0, b1, a0, b1, a1);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    const mesh = new THREE.Mesh(g, materials.stainlessSteel);
+    mesh.castShadow = true;
+    pipeGroup.add(mesh);
+  }
 
   pipeGroup.name = 'component_column';
   componentGroups.set('column', {
@@ -383,23 +585,49 @@ export function buildMechanicalCadAssembly(
     cycloneGroup.add(cowlMesh);
   }
 
-  // Tangential Inlet Duct Transition Piece
+  // ITEM 37 — the tangential stub that actually enters the barrel.
+  //
+  // This used to span the FULL flange-to-centre distance and started at the flange, so
+  // it ran the whole length of the transition as well. With the transition now taking
+  // `cycloneInletTransitionLengthM`, the stub starts where the transition ENDS and is
+  // `cycloneInletStubLengthM` long. Otherwise the two overlap and the transition's
+  // rectangular end is buried inside the stub, so the section change never reads.
   const inletWidth = params.cycloneInletWidthM;
   const inletHeight = params.cycloneInletHeightM;
-  const inletLength = params.cycloneInletLengthM;
-  const inletBoxGeo = new THREE.BoxGeometry(inletLength, inletHeight, inletWidth);
-  const inletBox = new THREE.Mesh(inletBoxGeo, materials.stainlessSteel);
-  inletBox.position.set(-inletLength / 2, cyH - inletHeight / 2 - 0.04, cyR - inletWidth / 2);
-  inletBox.castShadow = true;
-  cycloneGroup.add(inletBox);
+  const stubLength = params.cycloneInletStubLengthM;
+  // Local X of the stub's outer face = where the transition ends. The flange face is
+  // at local -cycloneInletLengthM, so the transition starts there and runs forward.
+  const stubOuterX = -params.cycloneInletLengthM + params.cycloneInletTransitionLengthM;
 
-  // Tangential Inlet Connection Flange
-  const inletFlange = new THREE.Mesh(
-    new THREE.BoxGeometry(0.02, inletHeight * 1.3, inletWidth * 1.4),
-    materials.stainlessSteelFlange
-  );
-  inletFlange.position.set(-inletLength, cyH - inletHeight / 2 - 0.04, cyR - inletWidth / 2);
-  cycloneGroup.add(inletFlange);
+  // The stub is omitted entirely when the transition already reaches the target
+  // penetration — which happens only for duct/inlet combinations so mismatched that no
+  // transition can absorb them. Drawing a zero-length box would add a stray plane.
+  if (stubLength > 1e-6) {
+    const inletBoxGeo = new THREE.BoxGeometry(stubLength, inletHeight, inletWidth);
+    const inletBox = new THREE.Mesh(inletBoxGeo, materials.stainlessSteel);
+    inletBox.position.set(
+      stubOuterX + stubLength / 2,
+      cyH - inletHeight / 2 - 0.04,
+      cyR - inletWidth / 2
+    );
+    inletBox.castShadow = true;
+    cycloneGroup.add(inletBox);
+
+    // ITEM 37 — the connection flange belongs on the stub's outer face, which is where
+    // the transition lands. It was on the flange, i.e. a whole transition-length
+    // upstream, leaving the transition's rectangular end unsupported and visibly
+    // detached from the joint that is supposed to carry it.
+    const inletFlange = new THREE.Mesh(
+      new THREE.BoxGeometry(0.02, inletHeight * 1.25, inletWidth * 1.25),
+      materials.stainlessSteelFlange
+    );
+    inletFlange.position.set(
+      stubOuterX - 0.01,
+      cyH - inletHeight / 2 - 0.04,
+      cyR - inletWidth / 2
+    );
+    cycloneGroup.add(inletFlange);
+  }
 
   // Four Structural Mounting Lugs on Cyclone Barrel Waist
   for (let i = 0; i < 4; i++) {
@@ -884,15 +1112,21 @@ export function buildMechanicalCadAssembly(
     upstreamBlowerGroup.add(uInletBell);
 
     // Tangential Rectangular Discharge Duct extending to Heat Exchanger Inlet Face
+    //
+    // ITEM 30 — sized from the nozzle the model computed, not from the volute.
+    // Previously `ubR * 0.5` by `ubW * 0.8`, i.e. from the fan, which produced a
+    // discharge roughly twice the duct area and could never read as mating.
+    const uNozW = params.upstreamBlowerOutletWidthM;
+    const uNozH = params.upstreamBlowerOutletHeightM;
     const uDuctL = Math.max(0.4, (params.hexPosition.x - params.hexWidthM / 2) - (uPos.x + ubR * 0.7));
-    const ubOutGeo = new THREE.BoxGeometry(uDuctL, ubR * 0.5, ubW * 0.8);
+    const ubOutGeo = new THREE.BoxGeometry(uDuctL, uNozH, uNozW);
     const ubOutMesh = new THREE.Mesh(ubOutGeo, materials.stainlessSteel);
     ubOutMesh.position.set(ubR * 0.7 + uDuctL / 2, ubR * 0.55, 0);
     upstreamBlowerGroup.add(ubOutMesh);
 
     // Mating Flange bolted to Heat Exchanger Inlet Collar
     const ubOutFlange = new THREE.Mesh(
-      new THREE.BoxGeometry(0.02, ubR * 0.65, ubW * 0.95),
+      new THREE.BoxGeometry(0.02, uNozH * 1.3, uNozW * 1.18),
       materials.stainlessSteelFlange
     );
     ubOutFlange.position.set(ubR * 0.7 + uDuctL, ubR * 0.55, 0);
@@ -901,7 +1135,7 @@ export function buildMechanicalCadAssembly(
     // In Balanced Mode: Supply Air Volume Control Balancing Damper
     if (params.pressureMode === 'balanced') {
       const damperHousing = new THREE.Mesh(
-        new THREE.BoxGeometry(0.18, ubR * 0.62, ubW * 0.92),
+        new THREE.BoxGeometry(0.18, uNozH * 1.24, uNozW * 1.16),
         materials.structuralSteel
       );
       damperHousing.position.set(ubR * 0.7 + uDuctL * 0.45, ubR * 0.55, 0);
@@ -968,12 +1202,35 @@ export function buildMechanicalCadAssembly(
     dVoluteMesh.castShadow = true;
     downstreamBlowerGroup.add(dVoluteMesh);
 
-    // Axial Suction Nozzle receiving the overhead drop duct
-    const dSuctionGeo = new THREE.CylinderGeometry(dbR * 0.45, dbR * 0.50, 0.20, 24);
-    dSuctionGeo.rotateX(Math.PI / 2);
+    // ITEM 40 — the suction nozzle is VERTICAL, sitting on top of the volute.
+    //
+    // It used to stand off to one side with its axis along Z, so the duct had to leave
+    // the vertical, turn 90 degrees, and run sideways to reach it. The user asked for
+    // that connection to be straight with no bend, and it can be: the duct's descending
+    // leg is already at (fanX, *, cycloneCenterZM) and the fan's own centre is at
+    // (fanX, *, cycloneCenterZM) too, because `downstreamBlowerPosition.z` is the
+    // cyclone centre Z. The duct was already dropping straight down the fan's centreline
+    // and then stepping sideways off it.
+    //
+    // So the nozzle moves to the top of the volute on the same axis, and no rotation is
+    // applied — a CylinderGeometry already has its axis on Y.
+    const dSuctionLen = 0.20;
+    const suctionThroatR = dbR * 0.45;
+    const suctionMouthR = dbR * 0.50;
+    const dSuctionGeo = new THREE.CylinderGeometry(
+      suctionThroatR,
+      suctionMouthR,
+      dSuctionLen,
+      24
+    );
     const dSuction = new THREE.Mesh(dSuctionGeo, materials.stainlessSteel);
-    dSuction.position.set(0, 0, dbW / 2 + 0.10);
+    dSuction.castShadow = true;
+    // Bottom face on the volute crown at local Y = dbR, body above it.
+    dSuction.position.set(0, dbR + dSuctionLen / 2, 0);
     downstreamBlowerGroup.add(dSuction);
+
+    // World Y of the nozzle's top face — where the overhead duct must stop.
+    const idSuctionTopY = dbPos.y + dbR + dSuctionLen;
 
     // Electric Motor with Cooling Fins
     const dmR = params.downstreamBlowerMotorRadiusM || dbR * 0.32;
@@ -994,27 +1251,18 @@ export function buildMechanicalCadAssembly(
     dSkidMesh.position.set(0, -dbR - dSkidH / 2, -dbW * 0.4);
     downstreamBlowerGroup.add(dSkidMesh);
 
-    // Vertical Clean Air Exhaust Stack rising from ID Fan Discharge Nozzle
-    const stackBaseX = dbR * 0.75;
-    const stackBaseY = dbR * 0.55;
-    const stackHeight = 2.4;
-    const stackR = Math.max(0.12, params.cycloneVortexFinderRadiusM * 0.95);
-    const dStackGeo = new THREE.CylinderGeometry(stackR, stackR, stackHeight, 24);
-    const dStackMesh = new THREE.Mesh(dStackGeo, materials.stainlessSteel);
-    dStackMesh.position.set(stackBaseX, stackBaseY + stackHeight / 2, 0);
-    dStackMesh.castShadow = true;
-    downstreamBlowerGroup.add(dStackMesh);
-
-    // Flanged connection at stack base
-    const dDischFlange = createFlangeJoint(stackR, 0.016, materials, 8);
-    dDischFlange.position.set(stackBaseX, stackBaseY + 0.05, 0);
-    downstreamBlowerGroup.add(dDischFlange);
-
-    // Weather cowl / diffuser hood at stack discharge
-    const dCowlGeo = new THREE.ConeGeometry(stackR * 1.5, 0.28, 20);
-    const dCowlMesh = new THREE.Mesh(dCowlGeo, materials.stainlessSteelDark);
-    dCowlMesh.position.set(stackBaseX, stackBaseY + stackHeight + 0.14, 0);
-    downstreamBlowerGroup.add(dCowlMesh);
+    // ITEM 40 — the fan outlet is REMOVED at the user's request.
+    //
+    // The discharge nozzle, its square-to-round transition, the 2.4 m stack, the
+    // discharge flange and the weather cowl are all gone. What remains is the volute, its
+    // motor, its skid and the vertical suction nozzle the overhead duct now drops onto.
+    //
+    // This also retires the two defects ITEM 33 had chased — the stack sized from the
+    // cyclone's vortex finder instead of the fan, and the stack standing on the same side
+    // as the descending duct so the two interpenetrated. Both are moot with no stack.
+    // `downstreamStackRadiusM` stays on the model because it is a reportable quantity and
+    // the fan's discharge port still has an area, but nothing in the 3D assembly is
+    // placed from it.
 
     downstreamBlowerGroup.position.set(dbPos.x, dbPos.y, dbPos.z);
     rootGroup.add(downstreamBlowerGroup);
@@ -1024,23 +1272,162 @@ export function buildMechanicalCadAssembly(
     const cyTopY = params.cycloneBarrelTopYM + 0.4;
     const cyZ = params.cycloneCenterZM;
     const overheadY = cyTopY + 0.65;
-    const idSuctionPt = new THREE.Vector3(dbPos.x, dbPos.y, dbPos.z + dbW / 2 + 0.18);
+    // ITEM 40 — the fan joint needs no standoff any more. `idSuctionStandoffM` existed only
+    // to give a final elbow room to turn from vertical into +Z to reach a nozzle standing
+    // off to one side. That elbow is gone and the nozzle now sits on TOP of the volute, so
+    // the duct simply falls the remaining height and Z has no say in the joint at all.
+    // `dbPos.z` is `cycloneCenterZM`, so the drop is on the same plane the 180 degree arc
+    // is drawn in and cannot come out skewed.
 
     const overheadDuctGroup = new THREE.Group();
     overheadDuctGroup.name = 'overhead_id_suction_duct';
 
     const ductR = params.cycloneVortexFinderRadiusM;
-    const overheadPts = [
-      new THREE.Vector3(cyX, cyTopY, cyZ),
-      new THREE.Vector3(cyX, overheadY, cyZ),
-      new THREE.Vector3(cyX + 0.35, overheadY + 0.25, cyZ),
-      new THREE.Vector3(dbPos.x - 0.35, overheadY + 0.25, cyZ),
-      new THREE.Vector3(dbPos.x, overheadY, cyZ),
-      new THREE.Vector3(dbPos.x, dbPos.y + 0.45, cyZ),
-      new THREE.Vector3(idSuctionPt.x, idSuctionPt.y, idSuctionPt.z),
-    ];
-    const overheadCurve = new THREE.CatmullRomCurve3(overheadPts, false, 'catmullrom', 0.15);
-    const overheadGeo = new THREE.TubeGeometry(overheadCurve, 40, ductR, 24, false);
+
+    // ITEM 34 — the elbow where the suction duct turns into the ID fan.
+    //
+    // The control points used to end with a 5.7 m vertical drop followed by a SINGLE
+    // 0.556 m step that turned in Z as well as Y:
+    //
+    //     (dbX, overheadY, cyZ) -> (dbX, dbY+0.45, cyZ) -> (dbX, dbY, idZ)
+    //
+    // A Catmull-Rom spline needs a direction either side of a turn to round it. Here
+    // the last two segments shared almost no common direction, so the spline
+    // overshot the corner — the visible kink. It is the same defect as the cyclone
+    // inlet connection (item 28), in the other duct.
+    //
+    // Replaced by an explicit tangent-continuous quarter bend: descend vertically on
+    // the duct's own axis, sweep an arc of the engine's bend radius, and arrive
+    // travelling horizontally into the suction nozzle, which is the axis the nozzle
+    // actually presents. 'centripetal' parameterisation cannot overshoot between
+    // control points, so the straight runs stay straight.
+    // ITEM 35 — the cyclone-to-fan arch is built from real tangent arcs.
+    //
+    // The old control points were:
+    //
+    //   (cyX,   cyTopY, cyZ)
+    //   (cyX,   overY,  cyZ)             straight up
+    //   (cyX+0.35, overY+0.25, cyZ)      <-- moves in X AND Y at once
+    //   (dbX-0.35, overY+0.25, cyZ)      straight across
+    //   (dbX,   overY,  cyZ)             <-- moves in X AND Y at once
+    //
+    // Two separate 90 degree corners, each faked by a single diagonal step. A
+    // Catmull-Rom spline needs direction either side of a turn to round it, and a
+    // diagonal step supplies none, so the spline overshot both corners. That is the
+    // kink across the top of the arch — and this IS the "180 degree curve" the user
+    // reported, being two quarter bends plus a straight.
+    //
+    // It is now two explicit quarter arcs of the engine's bend radius with a straight
+    // between them: up the vortex finder, arc over to horizontal, straight across,
+    // arc down to the drop. Tangent continuity is by construction, and the arcs
+    // consume exactly the rise and the run they need.
+    // ITEM 38 — ONE tangent-continuous 180 degree return of constant radius.
+    //
+    // The duct leaves the vortex finder travelling +Y and arrives above the fan
+    // travelling -Y, so both legs are vertical and the return is a semicircle:
+    //
+    //     entry (cyX,      cyTopY)  tangent +Y
+    //     apex  (cyX + R,  cyTopY + R)
+    //     exit  (cyX + 2R, cyTopY)  tangent -Y
+    //
+    // which forces R = crownSpanM / 2 exactly. There is no free parameter left, and
+    // crucially no room for a straight: at R = span/2 the two quarter arcs meet AT the
+    // apex on a shared horizontal tangent.
+    //
+    // What it replaced, and why it was wrong: two quarter arcs of `crownR` with a
+    // straight between them, where crownR was
+    // `min(bendRadiusM, crownSpanM/2, crownRiseM)`. The `crownRiseM` term clamped the
+    // radius to 0.65 m against a 1.80 m span, the two bends could not meet, and the
+    // leftover 0.50 m was inserted as a deliberate flat across the top — the shouldered
+    // "gothic arch". Shrinking R is what CAUSES a flat; it can never remove one.
+    //
+    // The rise clamp is gone because for a 180 degree bend the apex is necessarily
+    // cyTopY + R, and it clears the cyclone by construction — there is no separate rise
+    // budget to respect.
+    const crownSpanM = Math.abs(dbPos.x - cyX);
+    const crownR = Math.max(1e-3, crownSpanM / 2);
+    const crownApexYM = cyTopY + crownR;
+
+    // ITEM 38 — the radius must not be silently reduced if the span is tight. The fan is
+    // now placed at 2 * bendRadiusM downstream of the cyclone precisely so this cannot
+    // bind; see downstreamBlowerPosition in parametricModel.ts.
+    if (crownR < params.bendRadiusM - 1e-6) {
+      // Deliberately not clamped. If this ever fires the fan has been moved back inside
+      // the bend radius and the only honest outcomes are a tighter-than-specified elbow
+      // or a longer machine — both are decisions for the caller, not for this builder.
+    }
+
+    const overheadPts: THREE.Vector3[] = [];
+
+    // Straight up out of the vortex finder. Zero length at the default, because the bend
+    // starts right on the flange — kept so a taller build still has a square joint.
+    overheadPts.push(new THREE.Vector3(cyX, cyTopY, cyZ));
+
+    // The 180 degree arc, as a single sweep over a in [0, pi]:
+    //
+    //     x = (cyX + R) - R cos a      dx/da = R sin a   ->  0 at a=0, 0 at a=pi
+    //     y = cyTopY     + R sin a      dy/da = R cos a   -> +R at a=0, -R at a=pi
+    //
+    // The tangent is therefore +Y on entry and -Y on exit, and it is continuous through
+    // a = pi/2 by construction. Parametrising the WHOLE turn this way — rather than two
+    // separate quarter arcs with a straight spliced between them — is what removes the
+    // flat: there is no splice to be tangent-continuous across.
+    {
+      const steps = 48;
+      const cx = cyX + crownR;
+      for (let i = 1; i <= steps; i++) {
+        const a = Math.PI * (i / steps);
+        overheadPts.push(
+          new THREE.Vector3(cx - crownR * Math.cos(a), cyTopY + crownR * Math.sin(a), cyZ)
+        );
+      }
+    }
+
+    // ITEM 40 — the drop into the fan is STRAIGHT. There is no elbow here at all.
+    //
+    // The 180 degree arc above already leaves the duct travelling straight DOWN the fan's
+    // centreline, because `downstreamBlowerPosition.z` equals the cyclone centre Z. The
+    // old code then budgeted a quarter bend to turn that into +Z and reach a nozzle
+    // standing off to one side, which is the bend the user asked to be removed.
+    //
+    // With the nozzle on top of the volute on the same axis, the drop needs nothing but a
+    // straight: from the arc's exit at (fanX, cyTopY) down to the nozzle's top face at
+    // (fanX, idSuctionTopY). Both are on x = fanX and z = cycloneCenterZM, so the duct
+    // stays coaxial all the way down and mates square without a single fitting.
+    const reducerLen = params.idSuctionReducerLengthM;
+    // The reducer occupies the last stretch above the nozzle, so the tube itself stops
+    // short of the nozzle's top face by that much.
+    const ductEndY = idSuctionTopY + reducerLen;
+    overheadPts.push(new THREE.Vector3(dbPos.x, ductEndY, dbPos.z));
+
+    // ITEM 40 — the reducer between the outlet duct and the fan suction throat.
+  //
+  // The duct is 0.579 m at the IITA load; the throat is 0.433 m. The duct overhung the
+  // opening by 146 mm in diameter and could not enter it. Both ends are round and
+  // coaxial, so the correct transition is a concentric cone — and unlike the inlet-side
+  // case there is nothing to loft, because there is no rectangle to match.
+  //
+  // It runs on the vertical now, so there is NO rotation: a CylinderGeometry already has
+  // its axis on Y. Gas flows DOWN, so the duct's diameter is the TOP face and the throat's
+  // is the bottom face, which is the order `CylinderGeometry(radiusTop, radiusBottom, ...)`
+  // wants.
+  {
+    const geo = new THREE.CylinderGeometry(
+      ductR,                              // top: matches the duct it continues
+      params.downstreamBlowerInletRadiusM, // bottom: matches the throat it enters
+      reducerLen,
+      32,
+      1,
+      true
+    );
+    const mesh = new THREE.Mesh(geo, materials.stainlessSteel);
+    mesh.position.set(dbPos.x, idSuctionTopY + reducerLen / 2, dbPos.z);
+    mesh.castShadow = true;
+    overheadDuctGroup.add(mesh);
+  }
+
+  const overheadCurve = new THREE.CatmullRomCurve3(overheadPts, false, 'centripetal');
+    const overheadGeo = new THREE.TubeGeometry(overheadCurve, 64, ductR, 24, false);
     const overheadMesh = new THREE.Mesh(overheadGeo, materials.stainlessSteel);
     overheadMesh.castShadow = true;
     overheadDuctGroup.add(overheadMesh);
@@ -1078,11 +1465,9 @@ export function buildMechanicalCadAssembly(
     postBaseplate.position.set((cyX + dbPos.x) / 2, 0.008, cyZ);
     overheadDuctGroup.add(postBaseplate);
 
-    // Mating Flange at ID fan suction inlet
-    const idMatingFlange = createFlangeJoint(ductR, 0.016, materials, 8);
-    idMatingFlange.position.copy(idSuctionPt);
-    overheadDuctGroup.add(idMatingFlange);
-
+    // ITEM 41 — the mating flange at the fan suction nozzle is REMOVED at the user's
+    // request. The duct's reducer still lands exactly on the nozzle's top face, so the
+    // joint is continuous; it simply has no flange ring on it.
     rootGroup.add(overheadDuctGroup);
 
     // Register in componentGroups:
@@ -1121,19 +1506,35 @@ export function buildMechanicalCadAssembly(
   const alH = params.airlockHeightM;
 
   // Cylindrical Valve Housing
-  const alBodyGeo = new THREE.CylinderGeometry(alR, alR, alH * 0.7, 24);
+  //
+  // ITEM 29 — this was the "rotary lock keeps showing gaps" defect.
+  //
+  // The body was `alH * 0.7` tall but both flanges were positioned at `+/- alH / 2`,
+  // i.e. at the FULL half-height. That leaves an unfilled band of
+  // (alH/2 - 0.7*alH/2) = 0.15 * alH on each end — 42 mm at the default 280 mm
+  // housing, scaling to 63 mm on a 420 mm one. The flanges therefore floated
+  // clear of the barrel with daylight between them, which reads as a broken valve
+  // rather than a sectioned one.
+  //
+  // The housing now spans the full alH, so both flange faces land exactly on its
+  // end faces. The 0.7 was never a real dimension — nothing else referenced it.
+  const alBodyGeo = new THREE.CylinderGeometry(alR, alR, alH, 24);
   const alBody = new THREE.Mesh(alBodyGeo, materials.castIron);
   alBody.castShadow = true;
   airlockGroup.add(alBody);
 
   // Top Inlet Flange (Bolts directly to cyclone bottom dust flange)
   const alTopFlange = createFlangeJoint(alR, 0.016, materials, 6);
-  alTopFlange.position.set(0, alH / 2, 0);
+  alTopFlange.position.set(0, alH / 2 + 0.008, 0);
   airlockGroup.add(alTopFlange);
 
   // Bottom Outlet Flange
+  //
+  // Seated on the housing's lower face with the flange thickness accounted for, so
+  // its mating face coincides with the bore rather than floating half a flange
+  // proud of the barrel.
   const alBotFlange = createFlangeJoint(alR, 0.016, materials, 6);
-  alBotFlange.position.set(0, -alH / 2, 0);
+  alBotFlange.position.set(0, -alH / 2 - 0.008, 0);
   airlockGroup.add(alBotFlange);
 
   // Drive Gearmotor on side

@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import { CalculationResults } from '../types/dryer';
 import { STAIRMAND_RATIOS, LAPPLE_RATIOS } from '../utils/constants';
+import { Latex } from './Latex';
+import { INLINE_LATEX } from '../utils/stepLatex';
 
 interface DimensionCalculatorProps {
   results: CalculationResults;
@@ -246,9 +248,9 @@ Overall Frame: ${dimensions.frameFootprintLengthM.toFixed(1)}m L x ${dimensions.
                   </div>
                   {showCycloneDerivations && (
                     <div className="mt-1.5 p-2 rounded bg-sky-50 border border-sky-200/70 text-[11px] space-y-1 font-mono text-sky-950">
-                      <div className="flex justify-between">
-                        <span className="text-slate-600 font-sans">Formula:</span>
-                        <span className="font-bold">D_c = sqrt[ Q_v,out / (C_area × v_ci) ]</span>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-600 font-sans shrink-0">Formula:</span>
+                        <Latex tex={INLINE_LATEX.cyclone_Dc} className="text-right min-w-0" />
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-600 font-sans">Substitution:</span>
@@ -272,9 +274,9 @@ Overall Frame: ${dimensions.frameFootprintLengthM.toFixed(1)}m L x ${dimensions.
                   </div>
                   {showCycloneDerivations && (
                     <div className="mt-1.5 p-2 rounded bg-slate-50 border border-slate-200 text-[11px] space-y-0.5 font-mono text-slate-800">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-sans">Derivation:</span>
-                        <span className="font-bold">a = {ratios.inletHeight_a.toFixed(2)} × D_c</span>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-500 font-sans shrink-0">Derivation:</span>
+                        <Latex tex={INLINE_LATEX.cyclone_a} className="text-right min-w-0" />
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500 font-sans">Substitution:</span>
@@ -298,9 +300,9 @@ Overall Frame: ${dimensions.frameFootprintLengthM.toFixed(1)}m L x ${dimensions.
                   </div>
                   {showCycloneDerivations && (
                     <div className="mt-1.5 p-2 rounded bg-slate-50 border border-slate-200 text-[11px] space-y-0.5 font-mono text-slate-800">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-sans">Derivation:</span>
-                        <span className="font-bold">b = {ratios.inletWidth_b.toFixed(2)} × D_c</span>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-500 font-sans shrink-0">Derivation:</span>
+                        <Latex tex={INLINE_LATEX.cyclone_b} className="text-right min-w-0" />
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500 font-sans">Substitution:</span>
@@ -324,9 +326,9 @@ Overall Frame: ${dimensions.frameFootprintLengthM.toFixed(1)}m L x ${dimensions.
                   </div>
                   {showCycloneDerivations && (
                     <div className="mt-1.5 p-2 rounded bg-slate-50 border border-slate-200 text-[11px] space-y-0.5 font-mono text-slate-800">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-sans">Derivation:</span>
-                        <span className="font-bold">D_e = {ratios.vortexFinderDiameter_De.toFixed(2)} × D_c</span>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-500 font-sans shrink-0">Derivation:</span>
+                        <Latex tex={INLINE_LATEX.cyclone_De} className="text-right min-w-0" />
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500 font-sans">Substitution:</span>
@@ -350,9 +352,9 @@ Overall Frame: ${dimensions.frameFootprintLengthM.toFixed(1)}m L x ${dimensions.
                   </div>
                   {showCycloneDerivations && (
                     <div className="mt-1.5 p-2 rounded bg-slate-50 border border-slate-200 text-[11px] space-y-0.5 font-mono text-slate-800">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-sans">Derivation:</span>
-                        <span className="font-bold">S = {ratios.vortexFinderLength_S.toFixed(3)} × D_c</span>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-500 font-sans shrink-0">Derivation:</span>
+                        <Latex tex={INLINE_LATEX.cyclone_S} className="text-right min-w-0" />
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500 font-sans">Substitution:</span>
@@ -376,9 +378,9 @@ Overall Frame: ${dimensions.frameFootprintLengthM.toFixed(1)}m L x ${dimensions.
                   </div>
                   {showCycloneDerivations && (
                     <div className="mt-1.5 p-2 rounded bg-slate-50 border border-slate-200 text-[11px] space-y-0.5 font-mono text-slate-800">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-sans">Derivation:</span>
-                        <span className="font-bold">h = {ratios.cylinderHeight_h.toFixed(2)} × D_c</span>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-500 font-sans shrink-0">Derivation:</span>
+                        <Latex tex={INLINE_LATEX.cyclone_h} className="text-right min-w-0" />
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500 font-sans">Substitution:</span>
@@ -402,9 +404,9 @@ Overall Frame: ${dimensions.frameFootprintLengthM.toFixed(1)}m L x ${dimensions.
                   </div>
                   {showCycloneDerivations && (
                     <div className="mt-1.5 p-2 rounded bg-slate-50 border border-slate-200 text-[11px] space-y-0.5 font-mono text-slate-800">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-sans">Derivation:</span>
-                        <span className="font-bold">z = {ratios.coneHeight.toFixed(2)} × D_c</span>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-500 font-sans shrink-0">Derivation:</span>
+                        <Latex tex={INLINE_LATEX.cyclone_z} className="text-right min-w-0" />
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500 font-sans">Substitution:</span>
@@ -428,9 +430,9 @@ Overall Frame: ${dimensions.frameFootprintLengthM.toFixed(1)}m L x ${dimensions.
                   </div>
                   {showCycloneDerivations && (
                     <div className="mt-1.5 p-2 rounded bg-slate-50 border border-slate-200 text-[11px] space-y-0.5 font-mono text-slate-800">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-sans">Derivation:</span>
-                        <span className="font-bold">H = h + z = {ratios.totalHeight_H.toFixed(2)} × D_c</span>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-500 font-sans shrink-0">Derivation:</span>
+                        <Latex tex={INLINE_LATEX.cyclone_H} className="text-right min-w-0" />
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500 font-sans">Substitution:</span>
@@ -454,9 +456,9 @@ Overall Frame: ${dimensions.frameFootprintLengthM.toFixed(1)}m L x ${dimensions.
                   </div>
                   {showCycloneDerivations && (
                     <div className="mt-1.5 p-2 rounded bg-slate-50 border border-slate-200 text-[11px] space-y-0.5 font-mono text-slate-800">
-                      <div className="flex justify-between">
-                        <span className="text-slate-500 font-sans">Derivation:</span>
-                        <span className="font-bold">B = {ratios.dustOutletDiameter_B.toFixed(3)} × D_c</span>
+                      <div className="flex justify-between gap-2">
+                        <span className="text-slate-500 font-sans shrink-0">Derivation:</span>
+                        <Latex tex={INLINE_LATEX.cyclone_B} className="text-right min-w-0" />
                       </div>
                       <div className="flex justify-between">
                         <span className="text-slate-500 font-sans">Substitution:</span>
